@@ -48,10 +48,9 @@ app.use(
 
 const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:3000",
-  "http://localhost:3001",
   "http://localhost:5173",
-  "https://apireact.digitalever.com.bd",
-  "https://adminreact.digitalever.com.bd",
+  "https://perfectshop.world",
+  "https://admin.perfectshop.world",
 ];
 
 const ALLOWED_ORIGINS = new Set(
