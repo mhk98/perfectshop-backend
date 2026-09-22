@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const express = require("express");
+const compression = require("compression");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const http = require("http");
@@ -43,14 +44,21 @@ app.use(
 );
 
 /* ========================
+   COMPRESSION (gzip JSON & static responses)
+======================== */
+
+app.use(compression());
+
+/* ========================
    CORS
 ======================== */
 
 const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:3000",
+  "http://localhost:3001",
   "http://localhost:5173",
-  "https://perfectshop.world",
-  "https://admin.perfectshop.world",
+  "https://apireact.digitalever.com.bd",
+  "https://adminreact.digitalever.com.bd",
 ];
 
 const ALLOWED_ORIGINS = new Set(
@@ -140,7 +148,7 @@ app.use(userLogHistory);
    STATIC FILES
 ======================== */
 
-app.use("/images", express.static("images"));
+app.use("/images", express.static(process.env.UPLOAD_DIR || "images"));
 
 /* ========================
    SWAGGER DOCS

@@ -1407,6 +1407,29 @@ const updateOrderInDB = async (id, payload) => {
     next.fraudStatus = fraudStatus || null;
     next.fraudReason = next.fraudReason || null;
   }
+  const addressFieldsChanged =
+    Object.prototype.hasOwnProperty.call(next, "customerArea") ||
+    Object.prototype.hasOwnProperty.call(next, "customerDistrict");
+  if (addressFieldsChanged && !Object.prototype.hasOwnProperty.call(next, "note")) {
+    // Website orders freeze the checkout-time address inside note.customerAddress,
+    // which every read path (customer tracking, invoice, courier shipment) prefers
+    // over the customerArea/customerDistrict columns — keep it in sync on edit.
+    const meta = parseOrderMeta(order.note);
+    if (meta.__frontendOrder) {
+      const hasArea = Object.prototype.hasOwnProperty.call(next, "customerArea");
+      const hasDistrict = Object.prototype.hasOwnProperty.call(next, "customerDistrict");
+      // Admin's order-edit form sends the full address as a single customerArea
+      // string (no separate district) — don't re-append the stale district in that case.
+      const mergedAddress = hasArea && !hasDistrict
+        ? String(next.customerArea || "").trim()
+        : [hasArea ? next.customerArea : order.customerArea, hasDistrict ? next.customerDistrict : order.customerDistrict]
+            .filter(Boolean)
+            .join(", ");
+      if (mergedAddress) {
+        next.note = JSON.stringify({ ...meta, customerAddress: mergedAddress });
+      }
+    }
+  }
   if (Object.prototype.hasOwnProperty.call(next, "fraudStatus")) {
     const { fraudStatus, fraudReason, ...otherUpdates } = next;
     if (Object.keys(otherUpdates).length) {

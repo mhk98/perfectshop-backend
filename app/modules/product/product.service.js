@@ -574,6 +574,8 @@ const toStorefrontProduct = (product, maps = {}) => {
     quantity: stock,
     file: images[0] || null,
     gallery: images,
+    description: plain.description || null,
+    shortDescription: plain.shortDescription || null,
     features: plain.shortDescription ? [plain.shortDescription] : parseJsonArray(plain.features),
     variants: variations.map((variation) => ({
       colorId: variation.colorId || null,
@@ -597,13 +599,33 @@ const toStorefrontProduct = (product, maps = {}) => {
   };
 };
 
-const getStorefrontProducts = async () => {
-  const products = await Product.findAll({
-    where: { status: { [Op.ne]: "Inactive" } },
-    include: [{ model: Variation, as: "variations" }],
-    paranoid: true,
-    order: [["createdAt", "DESC"]],
-  });
+const getStorefrontProducts = async (options = {}) => {
+  const page = Math.max(Number(options.page) || 1, 1);
+  const limit = Math.min(Math.max(Number(options.limit) || 200, 1), 500);
+  const skip = (page - 1) * limit;
+  const searchTerm = String(options.searchTerm || "").trim();
+
+  const andConditions = [{ status: { [Op.ne]: "Inactive" } }];
+  if (searchTerm) {
+    andConditions.push({
+      [Op.or]: ProductSearchableFields.map((field) => ({
+        [field]: { [Op.like]: `%${searchTerm}%` },
+      })),
+    });
+  }
+  const whereConditions = { [Op.and]: andConditions };
+
+  const [total, products] = await Promise.all([
+    Product.count({ where: whereConditions, paranoid: true }),
+    Product.findAll({
+      where: whereConditions,
+      include: [{ model: Variation, as: "variations" }],
+      paranoid: true,
+      order: [["createdAt", "DESC"]],
+      limit,
+      offset: skip,
+    }),
+  ]);
 
   const variationColorIds = products.flatMap((product) =>
     (product.variations || []).map((variation) => variation.colorId),
@@ -616,9 +638,12 @@ const getStorefrontProducts = async () => {
     getNameMap(db.color, variationColorIds),
   ]);
 
-  return products.map((product) =>
-    toStorefrontProduct(product, { categories, subcategories, childcategories, colors }),
-  );
+  return {
+    products: products.map((product) =>
+      toStorefrontProduct(product, { categories, subcategories, childcategories, colors }),
+    ),
+    meta: { total, page, limit },
+  };
 };
 
 const getStorefrontProductById = async (id) => {

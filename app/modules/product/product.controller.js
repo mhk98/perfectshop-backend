@@ -81,7 +81,7 @@ const getAllFromDBWithoutQuery = catchAsync(async (req, res) => {
 });
 
 const getStorefrontProducts = catchAsync(async (req, res) => {
-  const result = await ProductService.getStorefrontProducts();
+  const result = await ProductService.getStorefrontProducts(req.query);
   sendResponse(res, {
     statusCode: 200,
     success: true,

@@ -3,7 +3,9 @@ const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 
-const UPLOAD_DIR = "images";
+// In production, point UPLOAD_DIR to an absolute path OUTSIDE the git-deployed
+// directory (e.g. /home/<user>/persistent-uploads) so files survive redeploys.
+const UPLOAD_DIR = process.env.UPLOAD_DIR || "images";
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 // Allowed MIME types — zip removed (security risk)
