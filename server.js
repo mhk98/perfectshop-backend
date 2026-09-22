@@ -1,7 +1,6 @@
 require("dotenv").config();
 
 const express = require("express");
-const compression = require("compression");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const http = require("http");
@@ -19,6 +18,16 @@ const { initializeChatSocket } = require("./app/realtime/socket");
 const app = express();
 const server = http.createServer(app);
 initializeChatSocket(server);
+
+let compression;
+try {
+  compression = require("compression");
+} catch (error) {
+  if (error.code !== "MODULE_NOT_FOUND") {
+    throw error;
+  }
+  console.warn("Optional dependency 'compression' is not installed; continuing without response compression.");
+}
 
 const requiredEnvVars = ["TOKEN_SECRET", "REFRESH_SECRET"];
 const missingEnvVars = requiredEnvVars.filter(
@@ -47,7 +56,9 @@ app.use(
    COMPRESSION (gzip JSON & static responses)
 ======================== */
 
-app.use(compression());
+if (compression) {
+  app.use(compression());
+}
 
 /* ========================
    CORS
