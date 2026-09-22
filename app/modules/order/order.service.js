@@ -687,12 +687,20 @@ const normalizeCourierPhone = (value) => {
 
 const getOrderMeta = (order) => parseJsonObject(order?.note);
 
+// Admin manual orders used to save the delivery-charge option (e.g. "ঢাকার বাইরে ১২০ টাকা")
+// as customerArea — that is not a deliverable address, so never send it to a courier.
+const DELIVERY_CHARGE_LABEL = /^[ঀ-৿a-z\s]*[০-৯0-9]+\s*(টাকা|tk|taka)$/i;
+const toCourierAddressPart = (value) => {
+  const text = String(value || "").trim();
+  return DELIVERY_CHARGE_LABEL.test(text) ? "" : text;
+};
+
 const getOrderAddressForCourier = (order) => {
   const meta = getOrderMeta(order);
-  return String(
-    meta.customerAddress ||
-      order.customerAddress ||
-      [order.customerArea, order.customerDistrict].filter(Boolean).join(", "),
+  return (
+    toCourierAddressPart(meta.customerAddress) ||
+    toCourierAddressPart(order.customerAddress) ||
+    [order.customerArea, order.customerDistrict].map(toCourierAddressPart).filter(Boolean).join(", ")
   ).trim();
 };
 
