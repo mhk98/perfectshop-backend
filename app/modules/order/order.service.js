@@ -107,10 +107,11 @@ const getIpVariants = (value) => {
   return [...new Set([ip, String(value || "").trim()].filter(Boolean))];
 };
 
-const generateOrderId = async () => {
+const generateOrderId = async (transaction) => {
   const last = await Order.findOne({
     order: [["Id", "DESC"]],
     paranoid: false,
+    transaction,
   });
   const nextNum = last ? last.Id + 1 : 1;
   return `TJ-${String(nextNum).padStart(4, "0")}`;
@@ -873,22 +874,45 @@ const getOrderForCourier = async (id) => {
   return order;
 };
 
-const getIncompleteOrderFromPayload = async (payload = {}) => {
-  const incompleteOrderId = Number(payload.incompleteOrderId || payload.draftOrderId || 0);
-  if (incompleteOrderId) {
-    const order = await Order.findOne({
-      where: { Id: incompleteOrderId, status: "incomplete" },
-      paranoid: true,
-    });
-    if (order) return order;
+const checkoutKeyFromPayload = (payload) => {
+  if (!payload.checkoutKey) return null;
+  const key = String(payload.checkoutKey);
+  if (!/^[a-zA-Z0-9_-]{16,128}$/.test(key)) {
+    throw new ApiError(400, "Invalid checkout key");
   }
+  return key;
+};
 
+const withOrderWriteLock = (work) => db.sequelize.transaction(async (transaction) => {
+  const lock = await db.orderWriteLock.findByPk(1, { transaction, lock: transaction.LOCK.UPDATE });
+  if (!lock) throw new ApiError(503, "Order storage is initializing. Please retry.");
+  return work(transaction);
+});
+
+const getIncompleteOrderFromPayload = async (payload = {}, transaction) => {
+  const checkoutKey = checkoutKeyFromPayload(payload);
+  if (checkoutKey) {
+    const existing = await Order.findOne({ where: { checkoutKey }, transaction, paranoid: false });
+    if (existing?.deletedAt) throw new ApiError(409, "This checkout was deleted. Start a new checkout.");
+    if (existing && String(existing.customerPhone).trim() !== String(payload.customerPhone).trim()) {
+      throw new ApiError(409, "Checkout phone does not match");
+    }
+    if (existing) return existing;
+    // A new checkout key represents a new purchase, even for the same phone.
+    return null;
+  }
   const phone = String(payload.customerPhone || "").trim();
+  const incompleteOrderId = Number(payload.incompleteOrderId || payload.draftOrderId || 0);
+  if (incompleteOrderId && phone) {
+    const order = await Order.findOne({
+      where: { Id: incompleteOrderId, customerPhone: phone }, transaction,
+    });
+    if (order) return order; // Completed drafts must never become incomplete again.
+  }
   if (!phone) return null;
   return Order.findOne({
     where: { customerPhone: phone, status: "incomplete" },
-    order: [["Id", "DESC"]],
-    paranoid: true,
+    order: [["Id", "DESC"]], transaction,
   });
 };
 
@@ -981,6 +1005,10 @@ const extractOrderSourceFromNote = (note) => {
 };
 
 const createOrderInDB = async (payload, options = {}) => {
+  if (checkoutKeyFromPayload(payload)) {
+    const replay = await getIncompleteOrderFromPayload(payload);
+    if (replay && replay.status !== "incomplete") return toPublicOrder(replay);
+  }
   const ipAddress = normalizeIpAddress(payload.ipAddress);
   const deviceId = normalizeDeviceId(payload.deviceId);
   if ((ipAddress || deviceId) && IpBlock) {
@@ -995,24 +1023,27 @@ const createOrderInDB = async (payload, options = {}) => {
   }
   const checkedPayload = await applyOrderCoupon({ ...payload, ipAddress, deviceId });
   const normalizedPayload = normalizeCreatePayload(checkedPayload);
-  const incompleteOrder = options.orderId
-    ? null
-    : await getIncompleteOrderFromPayload(checkedPayload);
-  let order;
-
-  if (incompleteOrder) {
-    await enforceOrderBlockLimit(checkedPayload);
-    await incompleteOrder.update({
-      ...normalizedPayload,
-      orderId: incompleteOrder.orderId,
-      status: "pending",
-    });
-    order = incompleteOrder;
-  } else {
-    await enforceOrderBlockLimit(checkedPayload);
-    const orderId = options.orderId || await generateOrderId();
-    order = await Order.create({ ...normalizedPayload, orderId });
-  }
+  // Run settings checks before taking the write lock: they use their own DB connection.
+  // Replays are resolved first below, so an already saved checkout can still be retrieved.
+  let blockError;
+  try { await enforceOrderBlockLimit(checkedPayload); } catch (error) { blockError = error; }
+  const { order, created } = await withOrderWriteLock(async (transaction) => {
+    const existing = options.orderId ? await Order.findOne({
+      where: { orderId: options.orderId }, transaction,
+    }) : await getIncompleteOrderFromPayload(checkedPayload, transaction);
+    if (existing && existing.status !== "incomplete") return { order: existing, created: false };
+    if (blockError) throw blockError;
+    if (existing) {
+      await existing.update({ ...normalizedPayload, status: "pending" }, { transaction });
+      return { order: existing, created: true };
+    }
+    const orderId = options.orderId || await generateOrderId(transaction);
+    const order = await Order.create({
+      ...normalizedPayload, orderId, checkoutKey: checkoutKeyFromPayload(checkedPayload),
+    }, { transaction });
+    return { order, created: true };
+  });
+  if (!created) return toPublicOrder(order);
 
   await NotificationService.createForRoles(
     ["superAdmin", "admin", "cs"],
@@ -1032,6 +1063,10 @@ const saveIncompleteOrderInDB = async (payload = {}) => {
   const phone = String(payload.customerPhone || "").trim();
   if (!phone) throw new ApiError(400, "Customer phone is required");
 
+  if (checkoutKeyFromPayload(payload)) {
+    const replay = await getIncompleteOrderFromPayload(payload);
+    if (replay && replay.status !== "incomplete") return toPublicOrder(replay);
+  }
   const ipAddress = normalizeIpAddress(payload.ipAddress);
   const deviceId = normalizeDeviceId(payload.deviceId);
   const checkedPayload = await applyOrderCoupon({ ...payload, ipAddress, deviceId });
@@ -1045,19 +1080,19 @@ const saveIncompleteOrderInDB = async (payload = {}) => {
     status: "incomplete",
   };
 
-  const existing = await getIncompleteOrderFromPayload({ ...checkedPayload, ipAddress });
-  if (existing) {
-    await existing.update({
-      ...normalizedPayload,
-      orderId: existing.orderId,
-      status: "incomplete",
-    });
-    return toPublicOrder(existing);
-  }
-
-  const orderId = await generateOrderId();
-  const order = await Order.create({ ...normalizedPayload, orderId });
-  return toPublicOrder(order);
+  return withOrderWriteLock(async (transaction) => {
+    const existing = await getIncompleteOrderFromPayload(checkedPayload, transaction);
+    if (existing) {
+      if (existing.status !== "incomplete") return toPublicOrder(existing);
+      await existing.update(normalizedPayload, { transaction });
+      return toPublicOrder(existing);
+    }
+    const orderId = await generateOrderId(transaction);
+    const order = await Order.create({
+      ...normalizedPayload, orderId, checkoutKey: checkoutKeyFromPayload(checkedPayload),
+    }, { transaction });
+    return toPublicOrder(order);
+  });
 };
 
 const validateOrderStatus = async (status) => {

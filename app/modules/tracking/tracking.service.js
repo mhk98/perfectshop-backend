@@ -10,7 +10,10 @@ const hash = (value) => {
   return crypto.createHash("sha256").update(normalized).digest("hex");
 };
 
-const hashPhone = (value) => hash(String(value || "").replace(/\D/g, ""));
+const hashPhone = (value) => {
+  const digits = String(value || "").replace(/\D/g, "");
+  return hash(/^01\d{9}$/.test(digits) ? `88${digits}` : digits);
+};
 const asHashArray = (value) => value ? [value] : undefined;
 
 const PLATFORM_EVENT_NAMES = {
@@ -36,9 +39,10 @@ const postJson = async (url, payload, headers = {}) => {
     method: "POST",
     headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(10000),
   });
   const data = await res.json().catch(() => ({}));
-  return { ok: res.ok, status: res.status, data };
+  return { ok: res.ok && !data.error && !data.partialFailureError && (!('code' in data) || Number(data.code) === 0), status: res.status, data };
 };
 
 const toMetaEvent = ({ eventName, eventId, eventSourceUrl, userData, customData, ipAddress, userAgent }) => ({
@@ -74,7 +78,7 @@ const sendMeta = async (payload, context) => {
         eventName: getPlatformEventName(payload.eventName, "meta"),
         ...context,
       })],
-      ...(row.testEventId ? { test_event_code: row.testEventId } : {}),
+      ...(process.env.NODE_ENV !== "production" && row.testEventId ? { test_event_code: row.testEventId } : {}),
     };
     results.push({ platform: "meta", pixelId: row.pixelsId, ...(await postJson(url, body)) });
   }
@@ -109,7 +113,7 @@ const sendTiktok = async (payload, context) => {
       event_source: "web",
       event_source_id: row.pixelCode,
       data: [toTiktokEvent({ ...payload, ...context })],
-      ...(row.testEventCode ? { test_event_code: row.testEventCode } : {}),
+      ...(process.env.NODE_ENV !== "production" && row.testEventCode ? { test_event_code: row.testEventCode } : {}),
     };
     results.push({
       platform: "tiktok",

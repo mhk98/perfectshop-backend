@@ -11,7 +11,8 @@
     "build": "echo 'No build step required'",
     "dev": "nodemon server.js",
     "demo-products:seed": "node tools/seedDemoProducts.js seed",
-    "demo-products:cleanup": "node tools/seedDemoProducts.js cleanup"
+    "demo-products:cleanup": "node tools/seedDemoProducts.js cleanup",
+    "uploads:migrate-cloudinary": "node tools/migrateUploadsToCloudinary.js"
   },
   "keywords": [],
   "author": "",
@@ -20,6 +21,7 @@
     "axios": "^1.2.3",
     "bcryptjs": "^2.4.3",
     "body-parser": "^1.20.1",
+    "cloudinary": "^2.11.0",
     "compression": "^1.8.2",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",

@@ -13,6 +13,10 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         unique: true,
       },
+      checkoutKey: {
+        type: DataTypes.STRING(128),
+        allowNull: true,
+      },
       customerName: {
         type: DataTypes.STRING(191),
         allowNull: false,

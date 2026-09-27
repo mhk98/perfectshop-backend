@@ -89,6 +89,11 @@ db.orderFraudCheck = require("../app/modules/order/orderFraudCheck.model")(
   DataTypes,
 );
 
+// Serialize draft/final writes across API processes, including invoice allocation.
+db.orderWriteLock = db.sequelize.define("OrderWriteLock", {
+  Id: { type: DataTypes.INTEGER, primaryKey: true },
+}, { timestamps: false });
+
 // Charge Settings (4 sub-models)
 db.codCharge = require("../app/modules/chargeSetting/codCharge.model")(
   db.sequelize,
@@ -951,6 +956,21 @@ db.ready = db.sequelize
     await ensurePurchaseRequisitionItemsColumn();
     await ensurePurchaseRequisitionExtraColumns();
     await ensureIpBlockCompatibilityColumns();
+    const orderTable = db.order.getTableName();
+    const qi = db.sequelize.getQueryInterface();
+    const columns = await qi.describeTable(orderTable);
+    if (!columns.checkoutKey) {
+      await qi.addColumn(orderTable, "checkoutKey", {
+        type: DataTypes.STRING(128), allowNull: true,
+      });
+    }
+    const indexes = await qi.showIndex(orderTable);
+    if (!indexes.some((index) => index.name === "orders_checkout_key_unique")) {
+      await qi.addIndex(orderTable, ["checkoutKey"], {
+        name: "orders_checkout_key_unique", unique: true,
+      });
+    }
+    await db.orderWriteLock.findOrCreate({ where: { Id: 1 } });
     await ensureOrderIpAddressColumn();
     await ensureOrderDeviceIdColumn();
     await ensureOrderSourceColumn();

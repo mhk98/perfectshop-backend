@@ -4,6 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const http = require("http");
+const path = require("path");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const swaggerJsdoc = require("swagger-jsdoc");
@@ -14,6 +15,10 @@ const routes = require("./app/routes");
 const ApiError = require("./error/ApiError");
 const userLogHistory = require("./app/middlewares/userLogHistory");
 const { initializeChatSocket } = require("./app/realtime/socket");
+const {
+  isCloudinaryEnabled,
+  cloudinaryUrlForLegacyFile,
+} = require("./helpers/cloudinary");
 
 const app = express();
 const server = http.createServer(app);
@@ -160,6 +165,18 @@ app.use(userLogHistory);
 ======================== */
 
 app.use("/images", express.static(process.env.UPLOAD_DIR || "images"));
+
+// Older records store only "<uuid>.<ext>". Once those files are migrated to
+// Cloudinary (tools/migrateUploadsToCloudinary.js) they no longer exist on
+// disk, so redirect to the Cloudinary copy that keeps the same name.
+if (isCloudinaryEnabled) {
+  app.get("/images/:name", (req, res, next) => {
+    const name = path.basename(req.params.name);
+    const ext = path.extname(name).toLowerCase();
+    if (!ext) return next();
+    res.redirect(301, cloudinaryUrlForLegacyFile(name, ext));
+  });
+}
 
 /* ========================
    SWAGGER DOCS
