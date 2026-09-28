@@ -6,6 +6,7 @@ const {
   isCloudinaryEnabled,
   uploadToCloudinary,
 } = require("../../helpers/cloudinary");
+const ApiError = require("../../error/ApiError");
 
 // Local fallback (used only when Cloudinary credentials are not set).
 // In production, point UPLOAD_DIR to an absolute path OUTSIDE the git-deployed
@@ -68,11 +69,23 @@ const collectFiles = (req) => {
 
 // Uploads the in-memory files to Cloudinary, then sets `filename` and `path`
 // to the secure URL, so controllers that store either keep working unchanged.
+// Cloudinary rejects with plain objects ({ message, http_code }); wrap them so the
+// client sees the real reason instead of a generic 500.
+const uploadOrThrow = async (file) => {
+  try {
+    return await uploadToCloudinary(file.buffer, generateFileName(file));
+  } catch (error) {
+    const reason = error?.message || error?.error?.message || "Unknown Cloudinary error";
+    console.error(`[Cloudinary] upload failed (${error?.http_code || "no status"}): ${reason}`);
+    throw new ApiError(502, `Image upload failed: ${reason}`);
+  }
+};
+
 const pushToCloudinary = async (req) => {
   const files = collectFiles(req);
   await Promise.all(
     files.map(async (file) => {
-      const result = await uploadToCloudinary(file.buffer, generateFileName(file));
+      const result = await uploadOrThrow(file);
       file.filename = result.secure_url;
       file.path = result.secure_url;
       file.cloudinaryPublicId = result.public_id;

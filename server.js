@@ -297,7 +297,7 @@ app.use((err, req, res, next) => {
     });
   }
 
-  if (err.code === "ENOENT") {
+  if (["ENOENT", "EACCES", "EPERM", "EROFS"].includes(err.code)) {
     return res.status(500).json({
       status: "error",
       message: "Upload folder is missing or not writable.",
