@@ -31,7 +31,9 @@ try {
   if (error.code !== "MODULE_NOT_FOUND") {
     throw error;
   }
-  console.warn("Optional dependency 'compression' is not installed; continuing without response compression.");
+  console.warn(
+    "Optional dependency 'compression' is not installed; continuing without response compression.",
+  );
 }
 
 const requiredEnvVars = ["TOKEN_SECRET", "REFRESH_SECRET"];
