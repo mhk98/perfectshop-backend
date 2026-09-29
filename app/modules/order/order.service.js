@@ -1878,8 +1878,17 @@ const bulkSendOrdersToPathaoInDB = async (orderIds = [], options = {}) => {
   return { sent, skipped };
 };
 
-const syncSteadfastStatusInDB = async (id) => {
+const saveCourierStatus = async (order, values, automatic) => {
+  if (!automatic) return order.update(values);
+  const [updated] = await Order.update(values, {
+    where: { Id: order.Id, status: order.status, note: order.note, courier: order.courier },
+  });
+  if (updated) Object.assign(order, values);
+};
+
+const syncSteadfastStatusInDB = async (id, { automatic = false } = {}) => {
   const order = await getOrderForCourier(id);
+  if (automatic && !["in_courier", "on_hold"].includes(order.status)) return null;
   const meta = getSteadfastMeta(order);
   const lookupValue = meta.consignmentId || meta.trackingCode || order.orderId;
   const path = meta.consignmentId
@@ -1891,7 +1900,7 @@ const syncSteadfastStatusInDB = async (id) => {
   const response = await steadfastRequest(path);
   const steadfastStatus = response?.delivery_status || response?.status_text || response?.status || "";
   const orderStatus = mapSteadfastStatusToOrderStatus(steadfastStatus);
-  await order.update({
+  await saveCourierStatus(order, {
     ...(orderStatus ? { status: orderStatus } : {}),
     courier: "Steadfast",
     note: mergeCourierMeta(order, "steadfast", {
@@ -1900,7 +1909,7 @@ const syncSteadfastStatusInDB = async (id) => {
       status: steadfastStatus,
       lastStatusResponse: response,
     }),
-  });
+  }, automatic);
 
   return {
     orderId: order.Id,
@@ -1911,8 +1920,9 @@ const syncSteadfastStatusInDB = async (id) => {
   };
 };
 
-const syncPathaoStatusInDB = async (id) => {
+const syncPathaoStatusInDB = async (id, { automatic = false } = {}) => {
   const order = await getOrderForCourier(id);
+  if (automatic && !["in_courier", "on_hold"].includes(order.status)) return null;
   const meta = getPathaoMeta(order);
   const lookupValue = meta.consignmentId || meta.trackingCode;
   if (!lookupValue) {
@@ -1935,7 +1945,7 @@ const syncPathaoStatusInDB = async (id) => {
     "";
   const orderStatus = mapPathaoStatusToOrderStatus(pathaoStatus);
 
-  await order.update({
+  await saveCourierStatus(order, {
     ...(orderStatus ? { status: orderStatus } : {}),
     courier: "Pathao",
     note: mergeCourierMeta(order, "pathao", {
@@ -1944,7 +1954,7 @@ const syncPathaoStatusInDB = async (id) => {
       status: pathaoStatus,
       lastStatusResponse: data,
     }),
-  });
+  }, automatic);
 
   return {
     orderId: order.Id,

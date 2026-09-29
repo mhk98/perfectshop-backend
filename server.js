@@ -11,6 +11,8 @@ const swaggerJsdoc = require("swagger-jsdoc");
 const swaggerUi = require("swagger-ui-express");
 
 const db = require("./models"); // Sequelize instance
+const { startCourierStatusSync } = require("./app/jobs/courierStatusSync");
+let stopCourierStatusSync = async () => {};
 const routes = require("./app/routes");
 const ApiError = require("./error/ApiError");
 const userLogHistory = require("./app/middlewares/userLogHistory");
@@ -325,6 +327,8 @@ const startServer = async () => {
     // Sync models (optional in production)
     // await db.sequelize.sync();
 
+    stopCourierStatusSync = startCourierStatusSync();
+
     server.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
@@ -347,6 +351,7 @@ startServer();
 
 process.on("SIGTERM", async () => {
   console.log("SIGTERM received. Shutting down gracefully...");
+  await stopCourierStatusSync();
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");
@@ -356,6 +361,7 @@ process.on("SIGTERM", async () => {
 
 process.on("SIGINT", async () => {
   console.log("SIGINT received. Shutting down gracefully...");
+  await stopCourierStatusSync();
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");
