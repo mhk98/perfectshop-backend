@@ -233,7 +233,30 @@ const getPublicOneFromDB = async (id) => {
     paranoid: true,
   });
   if (!row) throw new ApiError(404, "Landing page not found or inactive");
-  return row;
+  return attachFreeShipping(row.get({ plain: true }));
+};
+
+// Copy each linked product's freeShipping flag onto the landing page and its
+// product options so the public order form can waive the delivery charge.
+const attachFreeShipping = async (page) => {
+  const regularData = parseObject(page.regularData);
+  const options = Array.isArray(regularData.productOptions) ? regularData.productOptions : [];
+  const optionProductId = (item) => Number(item?.productId || item?.id || page.productId) || null;
+
+  const ids = [...new Set([page.productId, ...options.map(optionProductId)].map(Number).filter(Boolean))];
+  if (!ids.length || !Product()) return { ...page, freeShipping: false };
+
+  const products = await Product().findAll({ where: { Id: ids }, attributes: ["Id", "freeShipping"] });
+  const flags = new Map(products.map((p) => [Number(p.Id), Boolean(p.freeShipping)]));
+
+  return {
+    ...page,
+    freeShipping: flags.get(Number(page.productId)) || false,
+    regularData: JSON.stringify({
+      ...regularData,
+      productOptions: options.map((item) => ({ ...item, freeShipping: flags.get(optionProductId(item)) || false })),
+    }),
+  };
 };
 
 const updateOneFromDB = async (id, payload) => {
