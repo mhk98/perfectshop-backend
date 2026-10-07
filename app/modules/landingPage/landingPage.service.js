@@ -233,12 +233,23 @@ const getPublicOneFromDB = async (id) => {
     paranoid: true,
   });
   if (!row) throw new ApiError(404, "Landing page not found or inactive");
-  return attachFreeShipping(row.get({ plain: true }));
+  return attachProductData(row.get({ plain: true }));
 };
 
-// Copy each linked product's freeShipping flag onto the landing page and its
-// product options so the public order form can waive the delivery charge.
-const attachFreeShipping = async (page) => {
+// Same pricing rule as the storefront: the first variation's newPrice/oldPrice.
+const getLivePrice = (product) => {
+  const variation = (product.variations || [])
+    .slice()
+    .sort((a, b) => Number(a.Id) - Number(b.Id))[0] || {};
+  const oldPrice = Number(variation.oldPrice || variation.purchasePrice || 0);
+  const newPrice = Number(variation.newPrice || variation.oldPrice || variation.purchasePrice || 0);
+  return newPrice > 0 ? { price: newPrice, originalPrice: oldPrice || newPrice } : null;
+};
+
+// Copy each linked product's freeShipping flag and current price onto the
+// landing page and its product options, so the public order form waives the
+// delivery charge and always charges the live product price.
+const attachProductData = async (page) => {
   const regularData = parseObject(page.regularData);
   const options = Array.isArray(regularData.productOptions) ? regularData.productOptions : [];
   const optionProductId = (item) => Number(item?.productId || item?.id || page.productId) || null;
@@ -246,15 +257,26 @@ const attachFreeShipping = async (page) => {
   const ids = [...new Set([page.productId, ...options.map(optionProductId)].map(Number).filter(Boolean))];
   if (!ids.length || !Product()) return { ...page, freeShipping: false };
 
-  const products = await Product().findAll({ where: { Id: ids }, attributes: ["Id", "freeShipping"] });
+  const products = await Product().findAll({
+    where: { Id: ids },
+    attributes: ["Id", "freeShipping"],
+    include: [{ model: db.variation, as: "variations", required: false }],
+  });
   const flags = new Map(products.map((p) => [Number(p.Id), Boolean(p.freeShipping)]));
+  const prices = new Map(products.map((p) => [Number(p.Id), getLivePrice(p.get({ plain: true }))]));
+  const pagePrice = prices.get(Number(page.productId));
 
   return {
     ...page,
+    ...(pagePrice || {}),
     freeShipping: flags.get(Number(page.productId)) || false,
     regularData: JSON.stringify({
       ...regularData,
-      productOptions: options.map((item) => ({ ...item, freeShipping: flags.get(optionProductId(item)) || false })),
+      productOptions: options.map((item) => ({
+        ...item,
+        ...(prices.get(optionProductId(item)) || {}),
+        freeShipping: flags.get(optionProductId(item)) || false,
+      })),
     }),
   };
 };
