@@ -41,7 +41,7 @@ const generateFeed = async () => {
   });
 
   const FRONTEND_BASE = (process.env.ORIGIN_URL || process.env.FRONTEND_URL || "https://yourdomain.com").replace(/\/$/, "");
-  const BACKEND_BASE = (process.env.BACKEND_URL || process.env.API_URL || process.env.BASE_URL || process.env.ORIGIN_URL || "http://localhost:5000").replace(/\/$/, "");
+  const BACKEND_BASE = (process.env.BACKEND_URL || process.env.API_URL || process.env.BASE_URL || process.env.ORIGIN_URL || "https://holydeen.com").replace(/\/$/, "");
 
   const items = products.map((p) => {
     const plain = p.get({ plain: true });

@@ -7,6 +7,7 @@ const OrderService = require("../order/order.service");
 const Order = db.order;
 const Product = db.product;
 const Variation = db.variation;
+const { normalizeVariantOptions } = require("../../../shared/productVariants");
 
 const isNumericKeyMap = (value) => {
   if (!value || Array.isArray(value) || typeof value !== "object") return false;
@@ -303,9 +304,18 @@ const mapWooVariation = (item = {}, fallbackProduct = {}) => {
         .filter(Boolean)
     : [];
 
+  const options = Array.isArray(item.attributes)
+    ? Object.fromEntries(
+        item.attributes
+          .filter((attribute) => attribute.name && attribute.option)
+          .map((attribute) => [attribute.name, attribute.option]),
+      )
+    : {};
+
   return {
     colorImage: item.image?.src || null,
     attribute: attributes.join(", ") || item.name || null,
+    options: normalizeVariantOptions(options),
     availability: normalizeStockAvailability(item.stock_status || fallbackProduct.stock_status),
     oldPrice: regularPrice ?? price ?? salePrice,
     newPrice: salePrice ?? price ?? regularPrice,

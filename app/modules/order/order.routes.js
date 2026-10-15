@@ -14,6 +14,7 @@ router.post("/:id/reconfirm/send-otp", OrderController.sendReconfirmOtp);
 router.post("/:id/reconfirm/verify", OrderController.verifyReconfirmOtp);
 
 // Admin panel — require authentication
+router.post("/admin", auth(), OrderController.createStaffOrder);
 router.get("/status-counts", auth(), OrderController.getOrderStatusCounts);
 router.get("/courier/steadfast/balance", auth(), OrderController.getSteadfastBalance);
 router.get("/courier/steadfast/returns", auth(), OrderController.getSteadfastReturnRequests);

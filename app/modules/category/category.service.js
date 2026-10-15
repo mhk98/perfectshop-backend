@@ -2,6 +2,7 @@ const { Op } = require("sequelize");
 const paginationHelpers = require("../../../helpers/paginationHelper");
 const db = require("../../../models");
 const ApiError = require("../../../error/ApiError");
+const { isInlineImage } = require("../../../helpers/inlineImages");
 const { CategorySearchableFields } = require("./category.constants");
 const Category = db.category;
 
@@ -121,6 +122,7 @@ const getAllFromDBWithoutQuery = async () => {
 const getPublicMenu = async () => {
   const [categories, subcategories, childcategories] = await Promise.all([
     Category.findAll({
+      attributes: ["Id", "name", "sortOrder", "isActive", "frontView", "imageFile", "image"],
       where: {
         status: { [Op.ne]: "Inactive" },
       },
@@ -183,7 +185,9 @@ const getPublicMenu = async () => {
     subItems: subcategoriesByCategory[String(category.Id)] || [],
     sortOrder: category.sortOrder ?? index,
     isActive: category.isActive !== false && category.frontView !== false,
-    imageFile: category.imageFile || category.image || null,
+    // Rows not yet migrated may still hold multi-MB base64 strings; never
+    // ship those in the public menu.
+    imageFile: [category.imageFile, category.image].find((file) => file && !isInlineImage(file)) || null,
   }));
 };
 

@@ -9,8 +9,11 @@ const OrderStatusService = require("../orderStatus/orderStatus.service");
 const CouponCodeService = require("../couponCode/couponCode.service");
 const NotificationService = require("../notification/notification.service");
 const SmsMarketingService = require("../smsMarketing/smsMarketing.service");
+const { priceOrderItems, resolveStaffItems, calculateStaffTotals } = require("./orderPricing");
+const { registerOrderStockHooks } = require("./orderStock");
 
 const Order = db.order;
+registerOrderStockHooks(Order);
 const IpBlock = db.ipBlock;
 const User = db.user;
 const FAILED_DELIVERY_STATUSES = ["cancelled", "returned", "on_hold"];
@@ -107,13 +110,28 @@ const getIpVariants = (value) => {
   return [...new Set([ip, String(value || "").trim()].filter(Boolean))];
 };
 
-const generateOrderId = async () => {
+const generateOrderId = async (transaction) => {
   const last = await Order.findOne({
     order: [["Id", "DESC"]],
     paranoid: false,
+    transaction,
   });
   const nextNum = last ? last.Id + 1 : 1;
-  return `TJ-${String(nextNum).padStart(4, "0")}`;
+  return `${ORDER_ID_PREFIX}-${String(nextNum).padStart(4, "0")}`;
+};
+
+// Older orders were stored as TJ-/WZ-; the number part is the same sequence, so an
+// invoice typed with any of these prefixes matches the stored order.
+const ORDER_ID_PREFIX = "HD";
+const LEGACY_ORDER_ID_PREFIXES = ["TJ", "WZ"];
+
+const orderIdVariants = (value) => {
+  const raw = String(value || "").trim();
+  const match = raw.match(/^([A-Za-z]{2})-?(\d+)$/);
+  const prefixes = [ORDER_ID_PREFIX, ...LEGACY_ORDER_ID_PREFIXES];
+  if (!match || !prefixes.includes(match[1].toUpperCase())) return [raw];
+  const num = match[2].padStart(4, "0");
+  return prefixes.map((prefix) => `${prefix}-${num}`);
 };
 
 const parseOrderMeta = (note) => {
@@ -164,7 +182,7 @@ const toPublicOrder = (order) => {
 
   return {
     ...withAssignmentUsers(plain),
-    invoiceId: plain.orderId,
+    invoiceId: orderIdVariants(plain.orderId)[0] || plain.orderId,
     customerAddress: meta.customerAddress || [plain.customerArea, plain.customerDistrict].filter(Boolean).join(", "),
     paymentMethod: meta.paymentMethod || "cod",
     paymentStatus: meta.paymentStatus || "pending",
@@ -873,22 +891,45 @@ const getOrderForCourier = async (id) => {
   return order;
 };
 
-const getIncompleteOrderFromPayload = async (payload = {}) => {
-  const incompleteOrderId = Number(payload.incompleteOrderId || payload.draftOrderId || 0);
-  if (incompleteOrderId) {
-    const order = await Order.findOne({
-      where: { Id: incompleteOrderId, status: "incomplete" },
-      paranoid: true,
-    });
-    if (order) return order;
+const checkoutKeyFromPayload = (payload) => {
+  if (!payload.checkoutKey) return null;
+  const key = String(payload.checkoutKey);
+  if (!/^[a-zA-Z0-9_-]{16,128}$/.test(key)) {
+    throw new ApiError(400, "Invalid checkout key");
   }
+  return key;
+};
 
+const withOrderWriteLock = (work) => db.sequelize.transaction(async (transaction) => {
+  const lock = await db.orderWriteLock.findByPk(1, { transaction, lock: transaction.LOCK.UPDATE });
+  if (!lock) throw new ApiError(503, "Order storage is initializing. Please retry.");
+  return work(transaction);
+});
+
+const getIncompleteOrderFromPayload = async (payload = {}, transaction) => {
+  const checkoutKey = checkoutKeyFromPayload(payload);
+  if (checkoutKey) {
+    const existing = await Order.findOne({ where: { checkoutKey }, transaction, paranoid: false });
+    if (existing?.deletedAt) throw new ApiError(409, "This checkout was deleted. Start a new checkout.");
+    if (existing && String(existing.customerPhone).trim() !== String(payload.customerPhone).trim()) {
+      throw new ApiError(409, "Checkout phone does not match");
+    }
+    if (existing) return existing;
+    // A new checkout key represents a new purchase, even for the same phone.
+    return null;
+  }
   const phone = String(payload.customerPhone || "").trim();
+  const incompleteOrderId = Number(payload.incompleteOrderId || payload.draftOrderId || 0);
+  if (incompleteOrderId && phone) {
+    const order = await Order.findOne({
+      where: { Id: incompleteOrderId, customerPhone: phone }, transaction,
+    });
+    if (order) return order; // Completed drafts must never become incomplete again.
+  }
   if (!phone) return null;
   return Order.findOne({
     where: { customerPhone: phone, status: "incomplete" },
-    order: [["Id", "DESC"]],
-    paranoid: true,
+    order: [["Id", "DESC"]], transaction,
   });
 };
 
@@ -920,7 +961,13 @@ const applyOrderCoupon = async (payload = {}) => {
   };
 };
 
-const normalizeCreatePayload = (payload) => {
+const buildItemsProductName = (items = []) =>
+  items
+    .map((item) => `${item.name}${item.variant ? ` (${item.variant})` : ""} x${item.qty || 1}`)
+    .join(", ")
+    .slice(0, 255);
+
+const normalizeCreatePayload = ({ stockLedger, ...payload }) => {
   const orderSource = payload.orderSource || payload.source || "Website";
   if (!Array.isArray(payload.items)) {
     return {
@@ -933,7 +980,7 @@ const normalizeCreatePayload = (payload) => {
   const items = payload.items;
   const quantity = items.reduce((sum, item) => sum + Number(item.qty || 0), 0) || 1;
   const firstItem = items[0] || {};
-  const productName = items.map((item) => `${item.name} x${item.qty || 1}`).join(", ");
+  const productName = buildItemsProductName(items);
   const meta = {
     __frontendOrder: true,
     customerAddress: payload.customerAddress || "",
@@ -981,6 +1028,10 @@ const extractOrderSourceFromNote = (note) => {
 };
 
 const createOrderInDB = async (payload, options = {}) => {
+  if (checkoutKeyFromPayload(payload)) {
+    const replay = await getIncompleteOrderFromPayload(payload);
+    if (replay && replay.status !== "incomplete") return toPublicOrder(replay);
+  }
   const ipAddress = normalizeIpAddress(payload.ipAddress);
   const deviceId = normalizeDeviceId(payload.deviceId);
   if ((ipAddress || deviceId) && IpBlock) {
@@ -993,26 +1044,30 @@ const createOrderInDB = async (payload, options = {}) => {
       throw new ApiError(403, "Orders from this IP address are blocked");
     }
   }
-  const checkedPayload = await applyOrderCoupon({ ...payload, ipAddress, deviceId });
+  const pricedPayload = await priceOrderItems(payload, { strict: true });
+  const checkedPayload = await applyOrderCoupon({ ...pricedPayload, ipAddress, deviceId });
   const normalizedPayload = normalizeCreatePayload(checkedPayload);
-  const incompleteOrder = options.orderId
-    ? null
-    : await getIncompleteOrderFromPayload(checkedPayload);
-  let order;
-
-  if (incompleteOrder) {
-    await enforceOrderBlockLimit(checkedPayload);
-    await incompleteOrder.update({
-      ...normalizedPayload,
-      orderId: incompleteOrder.orderId,
-      status: "pending",
-    });
-    order = incompleteOrder;
-  } else {
-    await enforceOrderBlockLimit(checkedPayload);
-    const orderId = options.orderId || await generateOrderId();
-    order = await Order.create({ ...normalizedPayload, orderId });
-  }
+  // Run settings checks before taking the write lock: they use their own DB connection.
+  // Replays are resolved first below, so an already saved checkout can still be retrieved.
+  let blockError;
+  try { await enforceOrderBlockLimit(checkedPayload); } catch (error) { blockError = error; }
+  const { order, created } = await withOrderWriteLock(async (transaction) => {
+    const existing = options.orderId ? await Order.findOne({
+      where: { orderId: options.orderId }, transaction,
+    }) : await getIncompleteOrderFromPayload(checkedPayload, transaction);
+    if (existing && existing.status !== "incomplete") return { order: existing, created: false };
+    if (blockError) throw blockError;
+    if (existing) {
+      await existing.update({ ...normalizedPayload, status: "pending" }, { transaction });
+      return { order: existing, created: true };
+    }
+    const orderId = options.orderId || await generateOrderId(transaction);
+    const order = await Order.create({
+      ...normalizedPayload, orderId, checkoutKey: checkoutKeyFromPayload(checkedPayload),
+    }, { transaction });
+    return { order, created: true };
+  });
+  if (!created) return toPublicOrder(order);
 
   await NotificationService.createForRoles(
     ["superAdmin", "admin", "cs"],
@@ -1028,13 +1083,64 @@ const createOrderInDB = async (payload, options = {}) => {
   return toPublicOrder(order);
 };
 
+// Orders placed by staff from the admin panel (POS). Staff prices are trusted, but every
+// product line is resolved to a variant so stock is tracked.
+const createStaffOrderInDB = async (payload = {}) => {
+  const items = await resolveStaffItems(payload.items);
+  const totals = calculateStaffTotals(items, payload);
+  const orderSource = payload.orderSource || payload.source || "Manual";
+  const normalizedPayload = {
+    ...normalizeCreatePayload({
+      ...payload,
+      ...totals,
+      items,
+      advance: Math.max(0, Number(payload.advance) || 0),
+      customerAddress: payload.customerAddress || payload.customerArea || "",
+      paymentMethod: "cod",
+      orderSource,
+    }),
+    orderDate: payload.orderDate || new Date().toISOString().slice(0, 10),
+  };
+
+  const { order, created } = await withOrderWriteLock(async (transaction) => {
+    const checkoutKey = checkoutKeyFromPayload(payload);
+    if (checkoutKey) {
+      const existing = await Order.findOne({ where: { checkoutKey }, transaction });
+      if (existing) return { order: existing, created: false };
+    }
+    const orderId = await generateOrderId(transaction);
+    const order = await Order.create({ ...normalizedPayload, orderId, checkoutKey }, { transaction });
+    return { order, created: true };
+  });
+
+  if (created) {
+    await NotificationService.createForRoles(
+      ["superAdmin", "admin", "cs"],
+      {
+        title: "New order received",
+        message: `${order.orderId} — ${order.customerName || "Customer"} — ৳${Number(order.totalBill || 0).toFixed(2)}`,
+        type: "order_created",
+        priority: "high",
+        url: "/#page=orders&orderStatus=pending",
+        data: { orderId: order.Id, invoiceId: order.orderId },
+      },
+    ).catch((error) => console.error("Order notification failed:", error.message));
+  }
+  return toPublicOrder(order);
+};
+
 const saveIncompleteOrderInDB = async (payload = {}) => {
   const phone = String(payload.customerPhone || "").trim();
   if (!phone) throw new ApiError(400, "Customer phone is required");
 
+  if (checkoutKeyFromPayload(payload)) {
+    const replay = await getIncompleteOrderFromPayload(payload);
+    if (replay && replay.status !== "incomplete") return toPublicOrder(replay);
+  }
   const ipAddress = normalizeIpAddress(payload.ipAddress);
   const deviceId = normalizeDeviceId(payload.deviceId);
-  const checkedPayload = await applyOrderCoupon({ ...payload, ipAddress, deviceId });
+  const pricedPayload = await priceOrderItems(payload, { strict: false });
+  const checkedPayload = await applyOrderCoupon({ ...pricedPayload, ipAddress, deviceId });
   const normalizedPayload = {
     ...normalizeCreatePayload({
       ...checkedPayload,
@@ -1045,19 +1151,19 @@ const saveIncompleteOrderInDB = async (payload = {}) => {
     status: "incomplete",
   };
 
-  const existing = await getIncompleteOrderFromPayload({ ...checkedPayload, ipAddress });
-  if (existing) {
-    await existing.update({
-      ...normalizedPayload,
-      orderId: existing.orderId,
-      status: "incomplete",
-    });
-    return toPublicOrder(existing);
-  }
-
-  const orderId = await generateOrderId();
-  const order = await Order.create({ ...normalizedPayload, orderId });
-  return toPublicOrder(order);
+  return withOrderWriteLock(async (transaction) => {
+    const existing = await getIncompleteOrderFromPayload(checkedPayload, transaction);
+    if (existing) {
+      if (existing.status !== "incomplete") return toPublicOrder(existing);
+      await existing.update(normalizedPayload, { transaction });
+      return toPublicOrder(existing);
+    }
+    const orderId = await generateOrderId(transaction);
+    const order = await Order.create({
+      ...normalizedPayload, orderId, checkoutKey: checkoutKeyFromPayload(checkedPayload),
+    }, { transaction });
+    return toPublicOrder(order);
+  });
 };
 
 const validateOrderStatus = async (status) => {
@@ -1160,9 +1266,13 @@ const getOrdersFromDB = async (filters, paginationOptions, currentUser = {}) => 
   }
 
   if (search) {
-    where[Op.or] = ORDER_SEARCHABLE_FIELDS.map((field) => ({
-      [field]: { [Op.like]: `%${search}%` },
-    }));
+    const invoiceVariants = orderIdVariants(search);
+    where[Op.or] = [
+      ...ORDER_SEARCHABLE_FIELDS.map((field) => ({
+        [field]: { [Op.like]: `%${search}%` },
+      })),
+      ...(invoiceVariants.length > 1 ? [{ orderId: { [Op.in]: invoiceVariants } }] : []),
+    ];
   }
 
   if (fromDate && toDate) {
@@ -1256,7 +1366,7 @@ const trackOrdersByPhoneFromDB = async (phone, invoiceId, options = {}) => {
 
   const activeTrackingStatuses = ["pending", "confirmed", "packaging", "in_courier", "on_hold"];
   const baseWhere = normalizedInvoice
-    ? { orderId: normalizedInvoice }
+    ? { orderId: { [Op.in]: orderIdVariants(normalizedInvoice) } }
     : { customerPhone: { [Op.like]: `%${normalized}%` } };
   const where = normalizedInvoice || options.includeHistory
     ? baseWhere
@@ -1280,6 +1390,29 @@ const trackOrdersByPhoneFromDB = async (phone, invoiceId, options = {}) => {
   return orders.map(toPublicOrder);
 };
 
+const getCustomerOrderHistoryFromDB = async (phone, { page = 1, limit = 5 } = {}) => {
+  const normalized = normalizePhone(phone);
+  const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 5, 1), 50);
+  const safePage = Math.max(parseInt(page, 10) || 1, 1);
+  if (!normalized) return { orders: [], meta: { page: safePage, limit: safeLimit, total: 0 } };
+
+  const { rows, count } = await Order.findAndCountAll({
+    where: {
+      customerPhone: { [Op.like]: `%${normalized}%` },
+      status: { [Op.ne]: "incomplete" },
+    },
+    limit: safeLimit,
+    offset: (safePage - 1) * safeLimit,
+    order: [["Id", "DESC"]],
+    paranoid: true,
+  });
+
+  return {
+    orders: rows.map(toPublicOrder),
+    meta: { page: safePage, limit: safeLimit, total: count },
+  };
+};
+
 const getReconfirmOrder = async (id, phone) => {
   const rawId = String(id || "").trim();
   const normalizedPhone = normalizePhone(phone);
@@ -1292,7 +1425,7 @@ const getReconfirmOrder = async (id, phone) => {
     where: {
       [Op.or]: [
         ...(Number(rawId) ? [{ Id: Number(rawId) }] : []),
-        { orderId: rawId },
+        { orderId: { [Op.in]: orderIdVariants(rawId) } },
       ],
       customerPhone: { [Op.like]: `%${normalizedPhone}%` },
     },
@@ -1396,7 +1529,7 @@ const verifyOrderReconfirmOtpInDB = async (id, payload = {}) => {
 const updateOrderInDB = async (id, payload) => {
   const order = await Order.findByPk(id);
   if (!order) throw new ApiError(404, "Order not found");
-  const next = { ...payload };
+  const { stockLedger, ...next } = payload;
   if (next.source && !next.orderSource) {
     next.orderSource = next.source;
   }
@@ -1438,6 +1571,30 @@ const updateOrderInDB = async (id, payload) => {
       }
     }
   }
+  if (Array.isArray(next.items)) {
+    // Staff edited the order lines: store them in the order meta (which also drives
+    // variant stock via the order hooks) and recompute the totals.
+    const items = await resolveStaffItems(next.items);
+    const totals = calculateStaffTotals(items, next);
+    const meta = parseAnyOrderMeta(next.note ?? order.note);
+    const advance = next.advance !== undefined ? Math.max(0, Number(next.advance) || 0) : Number(order.advance || 0);
+    next.note = JSON.stringify({
+      ...meta,
+      __frontendOrder: meta.__frontendOrder ?? true,
+      items,
+      ...totals,
+      advance,
+    });
+    next.productName = buildItemsProductName(items) || order.productName;
+    next.productImage = items[0]?.image || order.productImage;
+    next.quantity = items.reduce((sum, item) => sum + item.qty, 0);
+    next.totalBill = totals.total;
+    next.advance = advance;
+  }
+  delete next.items;
+  delete next.subtotal;
+  delete next.deliveryCharge;
+  delete next.discount;
   if (Object.prototype.hasOwnProperty.call(next, "fraudStatus")) {
     const { fraudStatus, fraudReason, ...otherUpdates } = next;
     if (Object.keys(otherUpdates).length) {
@@ -1843,8 +2000,18 @@ const bulkSendOrdersToPathaoInDB = async (orderIds = [], options = {}) => {
   return { sent, skipped };
 };
 
-const syncSteadfastStatusInDB = async (id) => {
+// Compare the snapshot so a slow provider response cannot overwrite a newer edit.
+const saveCourierSync = async (order, values, automatic) => {
+  if (!automatic) return order.update(values);
+  const [updated] = await Order.update(values, { where: {
+    Id: order.Id, status: order.status, courier: order.courier, note: order.note,
+  } });
+  if (updated) Object.assign(order, values);
+};
+
+const syncSteadfastStatusInDB = async (id, { automatic = false } = {}) => {
   const order = await getOrderForCourier(id);
+  if (automatic && !["in_courier", "on_hold"].includes(order.status)) return;
   const meta = getSteadfastMeta(order);
   const lookupValue = meta.consignmentId || meta.trackingCode || order.orderId;
   const path = meta.consignmentId
@@ -1856,7 +2023,7 @@ const syncSteadfastStatusInDB = async (id) => {
   const response = await steadfastRequest(path);
   const steadfastStatus = response?.delivery_status || response?.status_text || response?.status || "";
   const orderStatus = mapSteadfastStatusToOrderStatus(steadfastStatus);
-  await order.update({
+  await saveCourierSync(order, {
     ...(orderStatus ? { status: orderStatus } : {}),
     courier: "Steadfast",
     note: mergeCourierMeta(order, "steadfast", {
@@ -1865,7 +2032,7 @@ const syncSteadfastStatusInDB = async (id) => {
       status: steadfastStatus,
       lastStatusResponse: response,
     }),
-  });
+  }, automatic);
 
   return {
     orderId: order.Id,
@@ -1876,8 +2043,9 @@ const syncSteadfastStatusInDB = async (id) => {
   };
 };
 
-const syncPathaoStatusInDB = async (id) => {
+const syncPathaoStatusInDB = async (id, { automatic = false } = {}) => {
   const order = await getOrderForCourier(id);
+  if (automatic && !["in_courier", "on_hold"].includes(order.status)) return;
   const meta = getPathaoMeta(order);
   const lookupValue = meta.consignmentId || meta.trackingCode;
   if (!lookupValue) {
@@ -1900,7 +2068,7 @@ const syncPathaoStatusInDB = async (id) => {
     "";
   const orderStatus = mapPathaoStatusToOrderStatus(pathaoStatus);
 
-  await order.update({
+  await saveCourierSync(order, {
     ...(orderStatus ? { status: orderStatus } : {}),
     courier: "Pathao",
     note: mergeCourierMeta(order, "pathao", {
@@ -1909,7 +2077,7 @@ const syncPathaoStatusInDB = async (id) => {
       status: pathaoStatus,
       lastStatusResponse: data,
     }),
-  });
+  }, automatic);
 
   return {
     orderId: order.Id,
@@ -1971,11 +2139,13 @@ const updateOrderStatusInDB = async (id, status, actorUserId) => {
 
 const OrderService = {
   createOrderInDB,
+  createStaffOrderInDB,
   saveIncompleteOrderInDB,
   getOrdersFromDB,
   getOrderStatusCountsFromDB,
   getOrderByIdFromDB,
   trackOrdersByPhoneFromDB,
+  getCustomerOrderHistoryFromDB,
   sendOrderReconfirmOtpInDB,
   verifyOrderReconfirmOtpInDB,
   updateOrderInDB,

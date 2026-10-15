@@ -13,6 +13,10 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         unique: true,
       },
+      checkoutKey: {
+        type: DataTypes.STRING(128),
+        allowNull: true,
+      },
       customerName: {
         type: DataTypes.STRING(191),
         allowNull: false,
@@ -112,6 +116,11 @@ module.exports = (sequelize, DataTypes) => {
       },
       assignedAt: {
         type: DataTypes.DATE,
+        allowNull: true,
+      },
+      // Variant stock currently held by this order: [{ variationId, qty }]
+      stockLedger: {
+        type: DataTypes.JSON,
         allowNull: true,
       },
       deletedAt: {

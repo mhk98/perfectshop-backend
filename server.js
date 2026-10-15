@@ -4,8 +4,14 @@ const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const http = require("http");
+const path = require("path");
 const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
+const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
+const {
+  getClientIp,
+  isInternalServerRequest,
+  isTrustedProxyRequest,
+} = require("./app/utils/clientIp");
 const swaggerJsdoc = require("swagger-jsdoc");
 const swaggerUi = require("swagger-ui-express");
 
@@ -14,9 +20,26 @@ const routes = require("./app/routes");
 const ApiError = require("./error/ApiError");
 const userLogHistory = require("./app/middlewares/userLogHistory");
 const { initializeChatSocket } = require("./app/realtime/socket");
+const {
+  isCloudinaryEnabled,
+  cloudinaryUrlForLegacyFile,
+} = require("./helpers/cloudinary");
+
+const {
+  createCourierSyncWorker,
+} = require("./app/modules/order/courierSync.worker");
+const courierSyncWorker = createCourierSyncWorker({
+  Order: db.order,
+  service: require("./app/modules/order/order.service"),
+});
 
 const app = express();
 const server = http.createServer(app);
+// The Next.js rewrite proxy reuses keep-alive sockets. Node's default 5s
+// keepAliveTimeout closes them first, so a reused socket gets ECONNRESET and the
+// proxy answers with an empty body. Keep sockets open longer than the proxy does.
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
 initializeChatSocket(server);
 
 let compression;
@@ -26,7 +49,9 @@ try {
   if (error.code !== "MODULE_NOT_FOUND") {
     throw error;
   }
-  console.warn("Optional dependency 'compression' is not installed; continuing without response compression.");
+  console.warn(
+    "Optional dependency 'compression' is not installed; continuing without response compression.",
+  );
 }
 
 const requiredEnvVars = ["TOKEN_SECRET", "REFRESH_SECRET"];
@@ -68,8 +93,8 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:5173",
-  "https://apireact.digitalever.com.bd",
-  "https://adminreact.digitalever.com.bd",
+  "https://holydeen.com",
+  "https://admin.holydeen.com",
 ];
 
 const ALLOWED_ORIGINS = new Set(
@@ -109,8 +134,24 @@ app.options("*", cors(corsOptions));
    RATE LIMITING
 ======================== */
 
+// Number of reverse proxies (nginx, load balancer) directly in front of this
+// server; decides how req.ip is read for callers that are not the frontend.
+app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS || 0));
+
+// Key by the customer's real IP: the frontend proxy forwards it with a shared
+// secret (see app/utils/clientIp.js); a forged X-Forwarded-For is ignored.
+const clientIpKey = (req) => ipKeyGenerator(getClientIp(req) || "unknown");
+const limiterDefaults = {
+  keyGenerator: clientIpKey,
+  // Frontend server-side rendering is not a customer; don't throttle it.
+  skip: isInternalServerRequest,
+  // X-Forwarded-For is handled above, so silence the library's misconfig warning.
+  validate: { xForwardedForHeader: false },
+};
+
 // Strict limiter for auth endpoints
 const authLimiter = rateLimit({
+  ...limiterDefaults,
   windowMs: 5 * 60 * 1000, // 5 minutes
   max: 10,
   standardHeaders: true,
@@ -124,6 +165,7 @@ const authLimiter = rateLimit({
 
 // General API limiter
 const apiLimiter = rateLimit({
+  ...limiterDefaults,
   windowMs: 60 * 1000, // 1 minute
   max: 200,
   standardHeaders: true,
@@ -160,6 +202,18 @@ app.use(userLogHistory);
 ======================== */
 
 app.use("/images", express.static(process.env.UPLOAD_DIR || "images"));
+
+// Older records store only "<uuid>.<ext>". Once those files are migrated to
+// Cloudinary (tools/migrateUploadsToCloudinary.js) they no longer exist on
+// disk, so redirect to the Cloudinary copy that keeps the same name.
+if (isCloudinaryEnabled) {
+  app.get("/images/:name", (req, res, next) => {
+    const name = path.basename(req.params.name);
+    const ext = path.extname(name).toLowerCase();
+    if (!ext) return next();
+    res.redirect(301, cloudinaryUrlForLegacyFile(name, ext));
+  });
+}
 
 /* ========================
    SWAGGER DOCS
@@ -216,6 +270,20 @@ app.get("/api/v1/health", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+// TEMPORARY: shows the IP chain each hop adds, to pick TRUSTED_PROXY_HOPS /
+// TRUST_PROXY_HOPS on the host. Remove once those are set.
+app.get("/api/v1/ip-check", (req, res) => {
+  res.json({
+    connectionIp: req.socket?.remoteAddress,
+    xForwardedFor: req.headers["x-forwarded-for"] || null,
+    xRealIp: req.headers["x-real-ip"] || null,
+    cfConnectingIp: req.headers["cf-connecting-ip"] || null,
+    xClientIpFromFrontend: req.headers["x-client-ip"] || null,
+    frontendSecretValid: isTrustedProxyRequest(req),
+    detectedIp: getClientIp(req),
+  });
 });
 
 app.use("/api/v1", routes);
@@ -308,6 +376,7 @@ const startServer = async () => {
 
     server.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
+      courierSyncWorker.start();
     });
   } catch (error) {
     console.error("❌ Failed to connect to database:", error.message);
@@ -328,6 +397,7 @@ startServer();
 
 process.on("SIGTERM", async () => {
   console.log("SIGTERM received. Shutting down gracefully...");
+  await courierSyncWorker.stop();
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");
@@ -337,6 +407,7 @@ process.on("SIGTERM", async () => {
 
 process.on("SIGINT", async () => {
   console.log("SIGINT received. Shutting down gracefully...");
+  await courierSyncWorker.stop();
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");

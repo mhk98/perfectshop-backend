@@ -2,6 +2,13 @@ const { Op, where } = require("sequelize"); // Ensure Op is imported
 const paginationHelpers = require("../../../helpers/paginationHelper");
 const db = require("../../../models");
 const ApiError = require("../../../error/ApiError");
+const {
+  normalizeVariantOptions,
+  variantOptionKey,
+  getVariationOptions,
+  variationSalePrice,
+  variationRegularPrice,
+} = require("../../../shared/productVariants");
 const { ProductSearchableFields } = require("./product.constants");
 const Product = db.product;
 const Variation = db.variation;
@@ -40,6 +47,77 @@ const optionalId = (value) => {
   if (value === undefined || value === null || value === "") return null;
   const numberValue = Number(value);
   return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : null;
+};
+
+const optionalPrice = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) && numberValue >= 0 ? numberValue : null;
+};
+
+// A variant image is one of the product images: an existing path, or "new:<i>" meaning
+// the i-th file uploaded with this same request.
+const resolveVariantImage = (ref, uploadedPaths = []) => {
+  const value = String(ref || "").trim();
+  if (!value) return null;
+  const match = /^new:(\d+)$/.exec(value);
+  if (match) return uploadedPaths[Number(match[1])] || null;
+  return value.slice(0, 500);
+};
+
+// Validates the admin "variations" payload. Returns undefined when the field was not sent.
+const parseVariationRows = (raw, uploadedPaths = []) => {
+  if (raw === undefined) return undefined;
+  let rows = raw;
+  if (typeof raw === "string") {
+    try { rows = JSON.parse(raw); } catch { throw new ApiError(400, "Invalid variations payload"); }
+  }
+  if (!Array.isArray(rows)) throw new ApiError(400, "Invalid variations payload");
+
+  const seen = new Set();
+  return rows.map((v = {}) => {
+    const options = normalizeVariantOptions(v.options);
+    const key = variantOptionKey(options);
+    if (seen.has(key)) {
+      throw new ApiError(400, key ? `Duplicate variant: ${Object.values(options).join(" / ")}` : "Only one variant can have no options");
+    }
+    seen.add(key);
+    return {
+      Id:            optionalId(v.Id ?? v.id),
+      options,
+      colorId:       optionalId(v.colorId),
+      colorImage:    resolveVariantImage(v.image ?? v.colorImage, uploadedPaths),
+      attribute:     v.attribute || null,
+      sku:           v.sku ? String(v.sku).trim() : null,
+      availability:  v.availability === "out of stock" ? "out of stock" : "in stock",
+      purchasePrice: optionalPrice(v.purchasePrice),
+      oldPrice:      optionalPrice(v.oldPrice),
+      newPrice:      optionalPrice(v.newPrice),
+      stock:         Math.max(0, Math.floor(Number(v.stock) || 0)),
+    };
+  });
+};
+
+// Updates variations in place (keeping their Ids stable for carts and orders),
+// creates new ones and soft-deletes the ones that were removed.
+const syncProductVariations = async (productId, rows, transaction) => {
+  const existing = await Variation.findAll({ where: { productId }, transaction });
+  const existingIds = new Set(existing.map((row) => Number(row.Id)));
+  const keptIds = new Set();
+
+  for (const { Id, ...values } of rows) {
+    if (Id && existingIds.has(Id)) {
+      keptIds.add(Id);
+      await Variation.update(values, { where: { Id, productId }, transaction });
+    } else {
+      await Variation.create({ ...values, productId }, { transaction });
+    }
+  }
+
+  const removedIds = [...existingIds].filter((id) => !keptIds.has(id));
+  if (removedIds.length) {
+    await Variation.destroy({ where: { productId, Id: { [Op.in]: removedIds } }, transaction });
+  }
 };
 
 const createSupplierPaymentIfNeeded = async ({
@@ -240,30 +318,11 @@ const insertIntoDB = async (data, files = []) => {
     date:            new Date().toISOString().slice(0, 10),
   };
 
+  const variationRows = parseVariationRows(variationsRaw, imagePaths);
   const product = await Product.create(payload);
 
-  // create variations
-  let parsedVariations = [];
-  if (variationsRaw) {
-    try {
-      parsedVariations = typeof variationsRaw === 'string' ? JSON.parse(variationsRaw) : variationsRaw;
-    } catch { parsedVariations = []; }
-  }
-
-  if (parsedVariations.length) {
-    await Promise.all(parsedVariations.map(v =>
-      Variation.create({
-        productId:     product.Id,
-        colorId:       v.colorId ? Number(v.colorId) : null,
-        colorImage:    v.colorImage || null,
-        attribute:     v.attribute || null,
-        availability:  v.availability || "in stock",
-        purchasePrice: v.purchasePrice ? Number(v.purchasePrice) : null,
-        oldPrice:      v.oldPrice      ? Number(v.oldPrice)      : null,
-        newPrice:      v.newPrice      ? Number(v.newPrice)      : null,
-        stock:         v.stock         ? Number(v.stock)         : 0,
-      })
-    ));
+  if (variationRows?.length) {
+    await syncProductVariations(product.Id, variationRows);
   }
 
   await createSupplierPaymentIfNeeded({
@@ -397,6 +456,8 @@ const updateOneFromDB = async (id, payload, files = []) => {
     purchaseEnabled, supplierId, payAmount, purchaseDate,
   } = payload;
 
+  const variationRows = parseVariationRows(variationsRaw, files.map(f => f.filename || f.path));
+
   return db.sequelize.transaction(async (transaction) => {
     const existingProduct = await Product.findOne({ where: { Id: id }, transaction, lock: transaction.LOCK.UPDATE });
     if (!existingProduct) throw new ApiError(404, "Product not found");
@@ -439,25 +500,8 @@ const updateOneFromDB = async (id, payload, files = []) => {
       await syncProductNameReferences(Number(id), nextName, transaction, oldName && oldName !== nextName ? [oldName] : []);
     }
 
-    // replace variations
-    let parsedVariations = [];
-    try { parsedVariations = typeof variationsRaw === 'string' ? JSON.parse(variationsRaw) : (variationsRaw || []); } catch { parsedVariations = []; }
-
-    if (parsedVariations.length) {
-      await Variation.destroy({ where: { productId: id }, transaction });
-      await Promise.all(parsedVariations.map(v =>
-        Variation.create({
-          productId:     id,
-          colorId:       v.colorId ? Number(v.colorId) : null,
-          colorImage:    v.colorImage || null,
-          attribute:     v.attribute || null,
-          availability:  v.availability || "in stock",
-          purchasePrice: v.purchasePrice ? Number(v.purchasePrice) : null,
-          oldPrice:      v.oldPrice      ? Number(v.oldPrice)      : null,
-          newPrice:      v.newPrice      ? Number(v.newPrice)      : null,
-          stock:         v.stock         ? Number(v.stock)         : 0,
-        }, { transaction })
-      ));
+    if (variationRows !== undefined) {
+      await syncProductVariations(Number(id), variationRows, transaction);
     }
 
     await createSupplierPaymentIfNeeded({
@@ -521,19 +565,6 @@ const getNameMap = async (Model, ids) => {
   return new Map(rows.map((row) => [Number(row.Id), row.name]));
 };
 
-const listValue = (value) => {
-  if (Array.isArray(value)) return value;
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value);
-      if (Array.isArray(parsed)) return parsed;
-    } catch {
-      return value ? [value] : [];
-    }
-  }
-  return value ? [value] : [];
-};
-
 const uniqueList = (items) => {
   const seen = new Set();
   return items.filter((item) => {
@@ -545,19 +576,53 @@ const uniqueList = (items) => {
 
 const toStorefrontProduct = (product, maps = {}) => {
   const plain = product.toJSON ? product.toJSON() : product;
-  const variations = plain.variations || [];
-  const firstVariation = variations[0] || {};
+  const variations = (plain.variations || [])
+    .slice()
+    .sort((a, b) => Number(a.Id) - Number(b.Id));
   const images = uniqueList([
     plain.file,
     ...parseJsonArray(plain.images),
     ...parseJsonArray(plain.gallery),
   ].filter(Boolean));
-  const oldPrice = Number(firstVariation.oldPrice || firstVariation.purchasePrice || 0);
-  const newPrice = Number(firstVariation.newPrice || firstVariation.oldPrice || firstVariation.purchasePrice || 0);
-  const discount = oldPrice > 0 && newPrice > 0 && oldPrice > newPrice
+
+  const variants = variations.map((variation) => {
+    const colorName = maps.colors?.get(Number(variation.colorId)) || null;
+    const stock = Number(variation.stock || 0);
+    return {
+      id: variation.Id,
+      options: getVariationOptions(variation, colorName),
+      sku: variation.sku || null,
+      image: variation.colorImage || null,
+      oldPrice: variationRegularPrice(variation),
+      newPrice: variationSalePrice(variation),
+      stock,
+      availability: variation.availability || null,
+      inStock: variation.availability !== "out of stock" && stock > 0,
+    };
+  });
+
+  // Option groups in first-seen order, e.g. [{ name: "Volume", values: ["3ml", "6ml"] }]
+  const optionGroups = new Map();
+  variants.forEach(({ options }) => {
+    Object.entries(options).forEach(([name, value]) => {
+      if (!optionGroups.has(name)) optionGroups.set(name, []);
+      const values = optionGroups.get(name);
+      if (!values.includes(value)) values.push(value);
+    });
+  });
+
+  const priced = variants.filter((variant) => variant.newPrice > 0);
+  const available = priced.filter((variant) => variant.inStock);
+  // Default price shown on cards: the cheapest in-stock variant.
+  const defaultVariant = (available.length ? available : priced)
+    .reduce((best, variant) => (!best || variant.newPrice < best.newPrice ? variant : best), null);
+  const newPrice = defaultVariant?.newPrice || 0;
+  const oldPrice = defaultVariant?.oldPrice || newPrice;
+  const discount = oldPrice > newPrice && newPrice > 0
     ? Math.round(((oldPrice - newPrice) / oldPrice) * 100)
     : 0;
-  const stock = variations.reduce((sum, item) => sum + Number(item.stock || 0), 0);
+  const salePrices = priced.map((variant) => variant.newPrice);
+  const stock = variants.reduce((sum, variant) => sum + (variant.inStock ? variant.stock : 0), 0);
 
   return {
     Id: plain.Id,
@@ -569,7 +634,9 @@ const toStorefrontProduct = (product, maps = {}) => {
     childCategory: maps.childcategories?.get(Number(plain.childcategoryId)) || null,
     childCategoryId: plain.childcategoryId,
     sale_price: newPrice,
-    original_price: oldPrice || newPrice,
+    original_price: oldPrice,
+    price_min: salePrices.length ? Math.min(...salePrices) : newPrice,
+    price_max: salePrices.length ? Math.max(...salePrices) : newPrice,
     discount,
     quantity: stock,
     file: images[0] || null,
@@ -577,21 +644,8 @@ const toStorefrontProduct = (product, maps = {}) => {
     description: plain.description || null,
     shortDescription: plain.shortDescription || null,
     features: plain.shortDescription ? [plain.shortDescription] : parseJsonArray(plain.features),
-    variants: variations.map((variation) => ({
-      colorId: variation.colorId || null,
-      colorName: maps.colors?.get(Number(variation.colorId)) || null,
-      attribute: variation.attribute || null,
-      size: listValue(variation.size),
-      color: variation.colorId && maps.colors?.get(Number(variation.colorId))
-        ? [maps.colors.get(Number(variation.colorId))]
-        : listValue(variation.color),
-      weight: variation.weight || null,
-      unit: variation.unit || null,
-      oldPrice: variation.oldPrice,
-      newPrice: variation.newPrice,
-      stock: variation.stock,
-      availability: variation.availability || null,
-    })),
+    options: [...optionGroups].map(([name, values]) => ({ name, values })),
+    variants,
     sku: plain.sku,
     freeShipping: Boolean(plain.freeShipping),
     inStock: stock > 0,

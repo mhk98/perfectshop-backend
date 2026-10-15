@@ -1,4 +1,5 @@
 const db = require("../../models");
+const { getClientIp } = require("./clientIp");
 
 const SENSITIVE_KEYS = new Set([
   "password",
@@ -102,14 +103,7 @@ const shouldLogRequest = (req) => {
   return ["POST", "PUT", "PATCH", "DELETE"].includes(method);
 };
 
-const resolveIpAddress = (req) => {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.trim()) {
-    return forwardedFor.split(",")[0].trim();
-  }
-
-  return req.ip || req.socket?.remoteAddress || null;
-};
+const resolveIpAddress = getClientIp;
 
 const createUserLogHistory = async ({
   req,

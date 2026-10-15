@@ -3,22 +3,59 @@ const sendResponse = require("../../../shared/sendResponse");
 const pick = require("../../../shared/pick");
 const OrderService = require("./order.service");
 const OrderFraudCheckService = require("./orderFraudCheck.service");
+const TrackingService = require("../tracking/tracking.service");
+const { getClientIp } = require("../../utils/clientIp");
 
-const resolveIpAddress = (req) => {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  const rawIp = Array.isArray(forwardedFor)
-    ? forwardedFor[0]
-    : String(forwardedFor || "").split(",")[0];
-  return (rawIp || req.ip || req.socket?.remoteAddress || "")
-    .replace(/^::ffff:/, "")
-    .trim() || null;
-};
+// Retain the same ID on retries and in the browser for platform deduplication.
+async function deliverPurchase(payload, context) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const result = await TrackingService.trackEvent(payload, context);
+      if (result.results.every((item) => item.ok || item.skipped)) return;
+    } catch {
+      // Tracking failures must never turn a saved order into a failed checkout.
+    }
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+  }
+  console.warn("Purchase tracking delivery failed", payload.eventId);
+}
 
 const createOrder = catchAsync(async (req, res) => {
   const result = await OrderService.createOrderInDB({
     ...req.body,
-    ipAddress: req.body.ipAddress || resolveIpAddress(req),
+    ipAddress: getClientIp(req),
   });
+  if (req.body.landingTracking?.enabled === true) {
+    const eventId = `Purchase.order.${result.Id || result.orderId}`;
+    result.purchaseEventId = eventId;
+    void deliverPurchase({
+      eventName: "Purchase",
+      eventId,
+      eventSourceUrl: req.body.landingTracking.eventSourceUrl,
+      userData: {
+        ...(req.body.tracking || {}),
+        name: result.customerName,
+        phone: result.customerPhone,
+        customerId: result.customerId,
+      },
+      customData: {
+        ...(req.body.landingTracking.customData || {}),
+        value: Number(result.totalBill),
+        currency: "BDT",
+        order_id: result.orderId || result.Id,
+      },
+    }, { headers: req.headers, ip: getClientIp(req) });
+  }
+  sendResponse(res, {
+    statusCode: 201,
+    success: true,
+    message: "Order created successfully",
+    data: result,
+  });
+});
+
+const createStaffOrder = catchAsync(async (req, res) => {
+  const result = await OrderService.createStaffOrderInDB(req.body);
   sendResponse(res, {
     statusCode: 201,
     success: true,
@@ -30,7 +67,7 @@ const createOrder = catchAsync(async (req, res) => {
 const saveIncompleteOrder = catchAsync(async (req, res) => {
   const result = await OrderService.saveIncompleteOrderInDB({
     ...req.body,
-    ipAddress: req.body.ipAddress || resolveIpAddress(req),
+    ipAddress: getClientIp(req),
   });
   sendResponse(res, {
     statusCode: 200,
@@ -285,6 +322,7 @@ const deleteOrder = catchAsync(async (req, res) => {
 
 const OrderController = {
   createOrder,
+  createStaffOrder,
   saveIncompleteOrder,
   getOrders,
   getOrderStatusCounts,

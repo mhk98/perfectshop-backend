@@ -7,6 +7,8 @@ module.exports = (sequelize, DataTypes) => {
       colorId:       { type: DataTypes.INTEGER(10),   allowNull: true },
       colorImage:    { type: DataTypes.STRING(500),   allowNull: true },
       attribute:     { type: DataTypes.STRING(500),   allowNull: true },
+      // Selected option values for this variant, e.g. { "Volume": "6ml", "Color": "Gold" }
+      options:       { type: DataTypes.JSON,          allowNull: true },
       purchasePrice: { type: DataTypes.DECIMAL(12,2), allowNull: true },
       oldPrice:      { type: DataTypes.DECIMAL(12,2), allowNull: true },
       newPrice:      { type: DataTypes.DECIMAL(12,2), allowNull: true },
