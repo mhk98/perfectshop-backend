@@ -39,8 +39,11 @@ function setup() {
     if (name.includes('siteSetting.service')) return { getByType: async () => null, getPublic: async () => ({}) };
     if (name.includes('notification.service')) return { createForRoles: async () => { notices++; } };
     if (name.includes('couponCode.service')) return { validateCoupon: async () => { throw Error('expired coupon'); } };
+<<<<<<< HEAD
     if (name === './orderPricing') return { priceOrderItems: async (payload) => payload };
     if (name === './orderStock') return { registerOrderStockHooks() {} };
+=======
+>>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
     if (name === 'crypto' || name === 'sequelize') return require(name);
     if (name.includes('ApiError')) return class extends Error { constructor(code, message) { super(message); this.statusCode = code; } };
     return {};

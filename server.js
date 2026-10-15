@@ -16,6 +16,8 @@ const swaggerJsdoc = require("swagger-jsdoc");
 const swaggerUi = require("swagger-ui-express");
 
 const db = require("./models"); // Sequelize instance
+const { startCourierStatusSync } = require("./app/jobs/courierStatusSync");
+let stopCourierStatusSync = async () => {};
 const routes = require("./app/routes");
 const ApiError = require("./error/ApiError");
 const userLogHistory = require("./app/middlewares/userLogHistory");
@@ -24,6 +26,7 @@ const {
   isCloudinaryEnabled,
   cloudinaryUrlForLegacyFile,
 } = require("./helpers/cloudinary");
+<<<<<<< HEAD
 
 const {
   createCourierSyncWorker,
@@ -32,6 +35,8 @@ const courierSyncWorker = createCourierSyncWorker({
   Order: db.order,
   service: require("./app/modules/order/order.service"),
 });
+=======
+>>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
 
 const app = express();
 const server = http.createServer(app);
@@ -346,7 +351,7 @@ app.use((err, req, res, next) => {
     });
   }
 
-  if (err.code === "ENOENT") {
+  if (["ENOENT", "EACCES", "EPERM", "EROFS"].includes(err.code)) {
     return res.status(500).json({
       status: "error",
       message: "Upload folder is missing or not writable.",
@@ -374,6 +379,8 @@ const startServer = async () => {
     // Sync models (optional in production)
     // await db.sequelize.sync();
 
+    stopCourierStatusSync = startCourierStatusSync();
+
     server.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       courierSyncWorker.start();
@@ -397,7 +404,11 @@ startServer();
 
 process.on("SIGTERM", async () => {
   console.log("SIGTERM received. Shutting down gracefully...");
+<<<<<<< HEAD
   await courierSyncWorker.stop();
+=======
+  await stopCourierStatusSync();
+>>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");
@@ -407,7 +418,11 @@ process.on("SIGTERM", async () => {
 
 process.on("SIGINT", async () => {
   console.log("SIGINT received. Shutting down gracefully...");
+<<<<<<< HEAD
   await courierSyncWorker.stop();
+=======
+  await stopCourierStatusSync();
+>>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");
