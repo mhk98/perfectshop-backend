@@ -12,7 +12,8 @@
     "dev": "nodemon server.js",
     "demo-products:seed": "node tools/seedDemoProducts.js seed",
     "demo-products:cleanup": "node tools/seedDemoProducts.js cleanup",
-    "uploads:migrate-cloudinary": "node tools/migrateUploadsToCloudinary.js"
+    "uploads:migrate-cloudinary": "node tools/migrateUploadsToCloudinary.js",
+    "images:migrate-inline": "node tools/migrateInlineImagesToCloudinary.js"
   },
   "keywords": [],
   "author": "",

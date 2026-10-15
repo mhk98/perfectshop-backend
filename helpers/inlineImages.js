@@ -16,6 +16,7 @@ const EXTENSION_BY_MIME = {
   "image/png": ".png",
   "image/gif": ".gif",
   "image/webp": ".webp",
+  "image/avif": ".avif",
   "image/x-icon": ".ico",
   "image/vnd.microsoft.icon": ".ico",
   // Served from res.cloudinary.com, so SVG scripts can't run on our origin.

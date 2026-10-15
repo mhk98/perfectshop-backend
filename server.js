@@ -27,6 +27,14 @@ const {
   cloudinaryUrlForLegacyFile,
 } = require("./helpers/cloudinary");
 
+const {
+  createCourierSyncWorker,
+} = require("./app/modules/order/courierSync.worker");
+const courierSyncWorker = createCourierSyncWorker({
+  Order: db.order,
+  service: require("./app/modules/order/order.service"),
+});
+
 const app = express();
 const server = http.createServer(app);
 // The Next.js rewrite proxy reuses keep-alive sockets. Node's default 5s
@@ -372,6 +380,7 @@ const startServer = async () => {
 
     server.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
+      courierSyncWorker.start();
     });
   } catch (error) {
     console.error("❌ Failed to connect to database:", error.message);
@@ -392,7 +401,7 @@ startServer();
 
 process.on("SIGTERM", async () => {
   console.log("SIGTERM received. Shutting down gracefully...");
-  await stopCourierStatusSync();
+  await courierSyncWorker.stop();
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");
@@ -402,7 +411,7 @@ process.on("SIGTERM", async () => {
 
 process.on("SIGINT", async () => {
   console.log("SIGINT received. Shutting down gracefully...");
-  await stopCourierStatusSync();
+  await courierSyncWorker.stop();
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");
