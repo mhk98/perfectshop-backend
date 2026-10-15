@@ -4,24 +4,7 @@ const pick = require("../../../shared/pick");
 const OrderService = require("./order.service");
 const OrderFraudCheckService = require("./orderFraudCheck.service");
 const TrackingService = require("../tracking/tracking.service");
-<<<<<<< HEAD
 const { getClientIp } = require("../../utils/clientIp");
-=======
-
-// Retain the same ID on retries and in the browser for platform deduplication.
-async function deliverPurchase(payload, context) {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const result = await TrackingService.trackEvent(payload, context);
-      if (result.results.every((item) => item.ok || item.skipped)) return;
-    } catch {
-      // Tracking failures must never turn a saved order into a failed checkout.
-    }
-    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
-  }
-  console.warn("Purchase tracking delivery failed", payload.eventId);
-}
->>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
 
 // Retain the same ID on retries and in the browser for platform deduplication.
 async function deliverPurchase(payload, context) {
@@ -61,7 +44,6 @@ const createOrder = catchAsync(async (req, res) => {
         currency: "BDT",
         order_id: result.orderId || result.Id,
       },
-<<<<<<< HEAD
     }, { headers: req.headers, ip: getClientIp(req) });
   }
   sendResponse(res, {
@@ -74,10 +56,6 @@ const createOrder = catchAsync(async (req, res) => {
 
 const createStaffOrder = catchAsync(async (req, res) => {
   const result = await OrderService.createStaffOrderInDB(req.body);
-=======
-    }, { headers: req.headers, ip: resolveIpAddress(req) });
-  }
->>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
   sendResponse(res, {
     statusCode: 201,
     success: true,

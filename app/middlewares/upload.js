@@ -7,17 +7,9 @@ const {
 } = require("../../helpers/cloudinary");
 const ApiError = require("../../error/ApiError");
 
-<<<<<<< HEAD
 // Every upload goes to Cloudinary; there is no local disk fallback, so a
 // missing configuration fails the request instead of silently writing files
 // that disappear on the next deploy.
-=======
-// Local fallback (used only when Cloudinary credentials are not set).
-// In production, point UPLOAD_DIR to an absolute path OUTSIDE the git-deployed
-// directory (e.g. /home/<user>/persistent-uploads) so files survive redeploys.
-const UPLOAD_DIR = process.env.UPLOAD_DIR || "images";
-if (!isCloudinaryEnabled) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
->>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
 
 // Allowed MIME types — zip removed (security risk)
 const ALLOWED_MIME_TYPES = new Set([
@@ -42,20 +34,7 @@ const ALLOWED_EXTENSIONS = new Set([
 const generateFileName = (file) =>
   `${randomUUID()}${path.extname(file.originalname).toLowerCase()}`;
 
-<<<<<<< HEAD
 const storage = multer.memoryStorage();
-=======
-const storage = isCloudinaryEnabled
-  ? multer.memoryStorage()
-  : multer.diskStorage({
-      destination: (req, file, cb) => {
-        cb(null, UPLOAD_DIR);
-      },
-      filename: (req, file, cb) => {
-        cb(null, generateFileName(file));
-      },
-    });
->>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
 
 const fileFilter = (req, file, cb) => {
   const ext = path.extname(file.originalname).toLowerCase();
@@ -71,7 +50,6 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-<<<<<<< HEAD
 // Profile photos: images only (no PDF), checked before anything reaches Cloudinary.
 const imageOnlyFilter = (req, file, cb) => {
   const ext = path.extname(file.originalname).toLowerCase();
@@ -102,16 +80,6 @@ const collectFiles = (req) => {
 
 // Uploads the in-memory files to Cloudinary, then sets `filename` and `path`
 // to the secure URL, so controllers that store either keep working unchanged.
-=======
-const collectFiles = (req) => {
-  if (req.file) return [req.file];
-  if (Array.isArray(req.files)) return req.files;
-  if (req.files && typeof req.files === "object") return Object.values(req.files).flat();
-  return [];
-};
-
-// Uploads the in-memory files to Cloudinary, then sets `filename` and `path`
-// to the secure URL, so controllers that store either keep working unchanged.
 // Cloudinary rejects with plain objects ({ message, http_code }); wrap them so the
 // client sees the real reason instead of a generic 500.
 const uploadOrThrow = async (file) => {
@@ -124,19 +92,11 @@ const uploadOrThrow = async (file) => {
   }
 };
 
->>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
 const pushToCloudinary = async (req) => {
   const files = collectFiles(req);
   await Promise.all(
     files.map(async (file) => {
-<<<<<<< HEAD
-      const result = await uploadToCloudinary(
-        file.buffer,
-        generateFileName(file),
-      );
-=======
       const result = await uploadOrThrow(file);
->>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
       file.filename = result.secure_url;
       file.path = result.secure_url;
       file.cloudinaryPublicId = result.public_id;
@@ -145,7 +105,6 @@ const pushToCloudinary = async (req) => {
   );
 };
 
-<<<<<<< HEAD
 const withStorage = (multerMiddleware) => (req, res, next) => {
   multerMiddleware(req, res, (err) => {
     if (err) {
@@ -166,16 +125,6 @@ const withStorage = (multerMiddleware) => (req, res, next) => {
     }
     pushToCloudinary(req).then(() => next(), next);
   });
-=======
-const withStorage = (multerMiddleware) => {
-  if (!isCloudinaryEnabled) return multerMiddleware;
-  return (req, res, next) => {
-    multerMiddleware(req, res, (err) => {
-      if (err) return next(err);
-      pushToCloudinary(req).then(() => next(), next);
-    });
-  };
->>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
 };
 
 const createUpload = () =>
@@ -202,7 +151,6 @@ const uploadUserDocuments = withStorage(
 );
 
 const uploadMultiple = withStorage(createUpload().array("gallery_images", 10));
-<<<<<<< HEAD
 
 const uploadAvatar = withStorage(
   multer({
@@ -211,8 +159,6 @@ const uploadAvatar = withStorage(
     fileFilter: imageOnlyFilter,
   }).single("image"),
 );
-=======
->>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
 
 module.exports = {
   uploadFile,

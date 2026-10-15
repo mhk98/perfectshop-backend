@@ -62,6 +62,8 @@ function serviceFixture({ courier = 'Steadfast', status = 'in_courier', provider
       if (name.includes('siteSetting.service')) return { getByType: async () => ({ data: {
         steadfast: { apiKey: 'test', secretKey: 'test' }, pathao: { clientId: 'test', clientSecret: 'test', username: 'test', password: 'test', storeId: 1 },
       } }) };
+      if (name === './orderPricing') return { priceOrderItems: async (payload) => payload };
+      if (name === './orderStock') return { registerOrderStockHooks() {} };
       if (name === 'crypto' || name === 'sequelize') return require(name);
       if (name.includes('ApiError')) return Error;
       return {};

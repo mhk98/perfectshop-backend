@@ -2,32 +2,6 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const { Op } = require('sequelize');
-const { createCourierSyncWorker } = require('../app/modules/order/courierSync.worker');
-
-test('worker paginates, isolates failures and prevents overlapping sweeps', async () => {
-  const calls = [];
-  let pages = 0;
-  const worker = createCourierSyncWorker({
-    Order: { async findAll({ where, limit }) {
-      assert.deepEqual(where.status[Op.in], ['in_courier', 'on_hold']);
-      assert.equal(limit, 100);
-      pages++;
-      return where.Id[Op.gt] === 0 ? [{ Id: 1, courier: 'Steadfast' }, { Id: 2, courier: 'Pathao' }]
-        : where.Id[Op.gt] === 2 ? [{ Id: 3, courier: 'Steadfast' }] : [];
-    } },
-    service: {
-      async syncSteadfastStatusInDB(id, options) { assert.equal(options.automatic, true); calls.push(id); if (id === 1) throw Error('unavailable'); },
-      async syncPathaoStatusInDB(id) { calls.push(id); },
-    }, logger: { warn() {}, error() {} },
-  });
-  await Promise.all([worker.run(), worker.run()]);
-  assert.deepEqual(calls, [1, 2, 3]);
-  assert.equal(pages, 3);
-  await worker.stop();
-  await worker.run();
-  assert.equal(pages, 3);
-});
 
 function setup(provider, { fail = false, changed = false, status = 'in_courier' } = {}) {
   const row = { Id: 7, orderId: 'INV7', courier: provider, status,

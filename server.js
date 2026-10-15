@@ -26,17 +26,6 @@ const {
   isCloudinaryEnabled,
   cloudinaryUrlForLegacyFile,
 } = require("./helpers/cloudinary");
-<<<<<<< HEAD
-
-const {
-  createCourierSyncWorker,
-} = require("./app/modules/order/courierSync.worker");
-const courierSyncWorker = createCourierSyncWorker({
-  Order: db.order,
-  service: require("./app/modules/order/order.service"),
-});
-=======
->>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
 
 const app = express();
 const server = http.createServer(app);
@@ -383,7 +372,6 @@ const startServer = async () => {
 
     server.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
-      courierSyncWorker.start();
     });
   } catch (error) {
     console.error("❌ Failed to connect to database:", error.message);
@@ -404,11 +392,7 @@ startServer();
 
 process.on("SIGTERM", async () => {
   console.log("SIGTERM received. Shutting down gracefully...");
-<<<<<<< HEAD
-  await courierSyncWorker.stop();
-=======
   await stopCourierStatusSync();
->>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");
@@ -418,11 +402,7 @@ process.on("SIGTERM", async () => {
 
 process.on("SIGINT", async () => {
   console.log("SIGINT received. Shutting down gracefully...");
-<<<<<<< HEAD
-  await courierSyncWorker.stop();
-=======
   await stopCourierStatusSync();
->>>>>>> 8cb196d76bb57f37ca6383d319f739e25cddbe1c
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");
