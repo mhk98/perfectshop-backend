@@ -2,6 +2,7 @@ const { Op } = require("sequelize");
 const paginationHelpers = require("../../../helpers/paginationHelper");
 const db = require("../../../models");
 const ApiError = require("../../../error/ApiError");
+const { clearTrackingCache } = require("../tracking/tracking.cache");
 const M = () => db.facebookPixel;
 
 const normalizePayload = (data = {}) => {
@@ -26,7 +27,9 @@ const ensureUnique = async (pixelsId, excludeId) => {
 const insertIntoDB = async (data) => {
   const payload = normalizePayload(data);
   await ensureUnique(payload.pixelsId);
-  return M().create(payload);
+  const row = await M().create(payload);
+  clearTrackingCache();
+  return row;
 };
 
 const getAllFromDB = async (filters, options) => {
@@ -57,6 +60,7 @@ const updateOneFromDB = async (id, payload) => {
   const data = normalizePayload({ ...row.get({ plain: true }), ...payload });
   await ensureUnique(data.pixelsId, row.Id);
   await row.update(data);
+  clearTrackingCache();
   return row;
 };
 
@@ -64,6 +68,7 @@ const deleteIdFromDB = async (id) => {
   const row = await M().findOne({ where: { Id: id } });
   if (!row) throw new ApiError(404, "Pixel not found");
   await row.destroy();
+  clearTrackingCache();
   return { deleted: true };
 };
 

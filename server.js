@@ -12,8 +12,6 @@ const {
   isInternalServerRequest,
   isTrustedProxyRequest,
 } = require("./app/utils/clientIp");
-const swaggerJsdoc = require("swagger-jsdoc");
-const swaggerUi = require("swagger-ui-express");
 
 const db = require("./models"); // Sequelize instance
 const { startCourierStatusSync } = require("./app/jobs/courierStatusSync");
@@ -125,6 +123,22 @@ app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
 /* ========================
+   DATABASE READINESS
+======================== */
+
+// The server starts listening before the database is reachable (see
+// startServer), so API calls get a clear 503 instead of failing in Sequelize.
+let databaseReady = false;
+app.use("/api", (_req, res, next) => {
+  if (databaseReady) return next();
+  res.set("Retry-After", "30");
+  return res.status(503).json({
+    status: "error",
+    message: "Server is starting. Please try again shortly.",
+  });
+});
+
+/* ========================
    RATE LIMITING
 ======================== */
 
@@ -213,34 +227,44 @@ if (isCloudinaryEnabled) {
    SWAGGER DOCS
 ======================== */
 
-const swaggerSpec = swaggerJsdoc({
-  definition: {
-    openapi: "3.0.0",
-    info: {
-      title: "Holy Deen Backend API",
-      version: "1.0.0",
-      description: "API documentation for Holy Deen Backend",
-    },
-    servers: [{ url: "/api/v1" }],
-    components: {
-      securitySchemes: {
-        bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
-      },
-    },
-    security: [{ bearerAuth: [] }],
-  },
-  apis: ["./app/modules/**/*.routes.js"],
-});
+// Off in production unless ENABLE_API_DOCS=true: building the spec parses every
+// route file at boot and keeps it in memory. Also gates /api/v1/ip-check.
+const developerRoutesEnabled =
+  process.env.ENABLE_API_DOCS === "true" || process.env.NODE_ENV !== "production";
 
-app.use(
-  "/api-docs",
-  swaggerUi.serve,
-  swaggerUi.setup(swaggerSpec, { explorer: true }),
-);
-app.get("/api-docs.json", (req, res) => {
-  res.setHeader("Content-Type", "application/json");
-  res.send(swaggerSpec);
-});
+if (developerRoutesEnabled) {
+  const swaggerJsdoc = require("swagger-jsdoc");
+  const swaggerUi = require("swagger-ui-express");
+
+  const swaggerSpec = swaggerJsdoc({
+    definition: {
+      openapi: "3.0.0",
+      info: {
+        title: "Holy Deen Backend API",
+        version: "1.0.0",
+        description: "API documentation for Holy Deen Backend",
+      },
+      servers: [{ url: "/api/v1" }],
+      components: {
+        securitySchemes: {
+          bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },
+        },
+      },
+      security: [{ bearerAuth: [] }],
+    },
+    apis: ["./app/modules/**/*.routes.js"],
+  });
+
+  app.use(
+    "/api-docs",
+    swaggerUi.serve,
+    swaggerUi.setup(swaggerSpec, { explorer: true }),
+  );
+  app.get("/api-docs.json", (req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.send(swaggerSpec);
+  });
+}
 
 /* ========================
    ROUTES
@@ -268,17 +292,19 @@ app.get("/api/v1/health", async (req, res, next) => {
 
 // TEMPORARY: shows the IP chain each hop adds, to pick TRUSTED_PROXY_HOPS /
 // TRUST_PROXY_HOPS on the host. Remove once those are set.
-app.get("/api/v1/ip-check", (req, res) => {
-  res.json({
-    connectionIp: req.socket?.remoteAddress,
-    xForwardedFor: req.headers["x-forwarded-for"] || null,
-    xRealIp: req.headers["x-real-ip"] || null,
-    cfConnectingIp: req.headers["cf-connecting-ip"] || null,
-    xClientIpFromFrontend: req.headers["x-client-ip"] || null,
-    frontendSecretValid: isTrustedProxyRequest(req),
-    detectedIp: getClientIp(req),
+if (developerRoutesEnabled) {
+  app.get("/api/v1/ip-check", (req, res) => {
+    res.json({
+      connectionIp: req.socket?.remoteAddress,
+      xForwardedFor: req.headers["x-forwarded-for"] || null,
+      xRealIp: req.headers["x-real-ip"] || null,
+      cfConnectingIp: req.headers["cf-connecting-ip"] || null,
+      xClientIpFromFrontend: req.headers["x-client-ip"] || null,
+      frontendSecretValid: isTrustedProxyRequest(req),
+      detectedIp: getClientIp(req),
+    });
   });
-});
+}
 
 app.use("/api/v1", routes);
 
@@ -358,30 +384,44 @@ app.use((err, req, res, next) => {
    SERVER START FUNCTION
 ======================== */
 
-const startServer = async () => {
-  try {
-    // Authenticate DB connection
-    await db.sequelize.authenticate();
-    await db.ready;
-    console.log("✅ Database connected successfully");
+// Exiting on a database error makes the host restart the process at once, and
+// every restart re-runs the boot migrations and spends another MySQL
+// connection attempt (ER_USER_LIMIT_REACHED). Stay up and retry with backoff.
+const DB_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000];
+let shuttingDown = false;
 
-    // Sync models (optional in production)
-    // await db.sequelize.sync();
-
-    stopCourierStatusSync = startCourierStatusSync();
-
-    server.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
-    });
-  } catch (error) {
-    console.error("❌ Failed to connect to database:", error.message);
-    if (error.original?.code === "ER_USER_LIMIT_REACHED") {
+const connectDatabase = async () => {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await db.sequelize.authenticate();
+      await db.initialize();
+      return;
+    } catch (error) {
+      const delay =
+        DB_RETRY_DELAYS_MS[Math.min(attempt, DB_RETRY_DELAYS_MS.length - 1)];
       console.error(
-        "⚠️  DB connection limit exceeded. ১ ঘণ্টা পর আবার চেষ্টা করুন অথবা hosting panel থেকে connection reset করুন।",
+        `❌ Failed to connect to database: ${error.message}. Retrying in ${delay / 1000}s`,
       );
+      if (error.original?.code === "ER_USER_LIMIT_REACHED") {
+        console.error(
+          "⚠️  DB connection limit exceeded. ১ ঘণ্টা পর আবার চেষ্টা করুন অথবা hosting panel থেকে connection reset করুন।",
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
-    process.exit(1);
   }
+};
+
+const startServer = async () => {
+  server.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+  });
+
+  await connectDatabase();
+  databaseReady = true;
+  console.log("✅ Database connected successfully");
+  // A shutdown that arrived while connecting must not start the job.
+  if (!shuttingDown) stopCourierStatusSync = startCourierStatusSync();
 };
 
 startServer();
@@ -392,6 +432,7 @@ startServer();
 
 process.on("SIGTERM", async () => {
   console.log("SIGTERM received. Shutting down gracefully...");
+  shuttingDown = true;
   await stopCourierStatusSync();
   await db.sequelize.close();
   server.close(() => {
@@ -402,6 +443,7 @@ process.on("SIGTERM", async () => {
 
 process.on("SIGINT", async () => {
   console.log("SIGINT received. Shutting down gracefully...");
+  shuttingDown = true;
   await stopCourierStatusSync();
   await db.sequelize.close();
   server.close(() => {

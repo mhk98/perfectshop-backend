@@ -4,6 +4,11 @@ const { getClientIp } = require("../../utils/clientIp");
 const FacebookPixelService = require("../facebookPixel/facebookPixel.service");
 const TiktokPixelService = require("../tiktokPixel/tiktokPixel.service");
 const GoogleAdsService = require("../googleAds/googleAds.service");
+const { cached } = require("./tracking.cache");
+
+const getActiveMetaPixels = () => cached("meta:active", FacebookPixelService.getActiveFromDB);
+const getActiveTiktokPixels = () => cached("tiktok:active", TiktokPixelService.getActiveFromDB);
+const getActiveGoogleAds = () => cached("googleAds:active", GoogleAdsService.getActiveFromDB);
 
 const hash = (value) => {
   const normalized = String(value || "").trim().toLowerCase();
@@ -66,7 +71,7 @@ const toMetaEvent = ({ eventName, eventId, eventSourceUrl, userData, customData,
 });
 
 const sendMeta = async (payload, context) => {
-  const pixels = await FacebookPixelService.getActiveFromDB();
+  const pixels = await getActiveMetaPixels();
   const results = [];
   for (const pixel of pixels) {
     const row = pixel.toJSON();
@@ -104,7 +109,7 @@ const toTiktokEvent = ({ eventName, eventId, eventSourceUrl, referrerUrl, userDa
 });
 
 const sendTiktok = async (payload, context) => {
-  const pixels = await TiktokPixelService.getActiveFromDB();
+  const pixels = await getActiveTiktokPixels();
   const results = [];
   for (const pixel of pixels) {
     const row = pixel.toJSON();
@@ -157,7 +162,7 @@ const getGoogleClickId = (userData = {}) =>
 const sendGoogleAds = async (payload) => {
   if (payload.eventName !== "Purchase") return [];
 
-  const configs = await GoogleAdsService.getActiveFromDB();
+  const configs = await getActiveGoogleAds();
   const results = [];
   for (const config of configs) {
     const row = config.toJSON();
@@ -214,30 +219,59 @@ const sendGoogleAds = async (payload) => {
   return results;
 };
 
-const getPublicConfig = async () => {
-  const [metaPixels, tiktokPixels, googleAds] = await Promise.all([
-    FacebookPixelService.getPublicFromDB(),
-    TiktokPixelService.getPublicFromDB(),
-    GoogleAdsService.getPublicFromDB(),
-  ]);
-  return { metaPixels, tiktokPixels, googleAds };
-};
+const getPublicConfig = () =>
+  cached("public", async () => {
+    const [metaPixels, tiktokPixels, googleAds] = await Promise.all([
+      FacebookPixelService.getPublicFromDB(),
+      TiktokPixelService.getPublicFromDB(),
+      GoogleAdsService.getPublicFromDB(),
+    ]);
+    return { metaPixels, tiktokPixels, googleAds };
+  });
 
-const trackEvent = async (payload, req) => {
+const toEvent = (payload = {}) => {
   const eventName = String(payload.eventName || "").trim();
   if (!eventName) throw new ApiError(400, "eventName is required");
   const eventId = payload.eventId || `${eventName}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
-  const context = {
-    ipAddress: getClientIp(req),
-    userAgent: req.headers["user-agent"],
-  };
-  const basePayload = { ...payload, eventName, eventId };
+  return { ...payload, eventName, eventId };
+};
+
+const getEventContext = (req) => ({
+  ipAddress: getClientIp(req),
+  userAgent: req.headers["user-agent"],
+});
+
+const deliverEvent = async (basePayload, context) => {
   const [meta, tiktok, googleAds] = await Promise.all([
     sendMeta(basePayload, context).catch((error) => [{ platform: "meta", ok: false, error: error.message }]),
     sendTiktok(basePayload, context).catch((error) => [{ platform: "tiktok", ok: false, error: error.message }]),
     sendGoogleAds(basePayload).catch((error) => [{ platform: "google_ads", ok: false, error: error.message }]),
   ]);
-  return { eventId, results: [...meta, ...tiktok, ...googleAds] };
+  return { eventId: basePayload.eventId, results: [...meta, ...tiktok, ...googleAds] };
 };
 
-module.exports = { getPublicConfig, trackEvent };
+// Waits for every platform; used where the caller acts on the results
+// (order.controller retries Purchase delivery).
+const trackEvent = async (payload, req) => deliverEvent(toEvent(payload), getEventContext(req));
+
+// Validates now and delivers in the background. Browsers ignore the platform
+// results, and holding the request open (up to 10s per platform) kept a
+// server process busy for every storefront event.
+const queueEvent = (payload, req) => {
+  const basePayload = toEvent(payload);
+  const context = getEventContext(req);
+  deliverEvent(basePayload, context)
+    .then(({ results }) => {
+      const failures = results.filter((item) => !item.ok && !item.skipped);
+      if (failures.length) {
+        console.warn(
+          `Tracking ${basePayload.eventName} delivery failed:`,
+          failures.map(({ platform, status, error }) => ({ platform, status, error })),
+        );
+      }
+    })
+    .catch((error) => console.warn(`Tracking ${basePayload.eventName} failed: ${error.message}`));
+  return { eventId: basePayload.eventId, queued: true };
+};
+
+module.exports = { getPublicConfig, trackEvent, queueEvent };

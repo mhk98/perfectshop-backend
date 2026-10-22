@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const { Op } = require('sequelize');
-const { syncCourierOrders, withSyncLock, startCourierStatusSync } = require('../app/jobs/courierStatusSync');
+const { syncCourierOrders, withSyncLock, startCourierStatusSync, getMaxAgeDays } = require('../app/jobs/courierStatusSync');
 
 test('sweeps all pages as statuses change, skips terminal/unsupported orders, continues after errors', async () => {
   const rows = Array.from({ length: 205 }, (_, i) => ({ Id: i + 1, courier: 'Steadfast', status: 'in_courier', note: '' }));
@@ -26,13 +26,23 @@ test('shutdown stops before another courier request', async () => {
   assert.equal(calls, 1);
 });
 
-for (const acquired of [0, 1]) test(`database lock acquired=${acquired} protects sweep and releases connection`, async () => {
-  const queries = []; let ran = false, released = false;
-  const connection = { query(sql, params, callback) { queries.push(sql); callback(null, [{ acquired }]); } };
-  const sequelize = { getDatabaseName: () => 'test', connectionManager: { getConnection: async () => connection, releaseConnection: async c => { assert.equal(c, connection); released = true; } } };
-  const result = withSyncLock(sequelize, async () => { ran = true; throw Error('sweep failed'); });
+// The lock runs on its own connection: the request pool must never be touched.
+function lockSequelize(connection, { onDisconnect = async () => {} } = {}) {
+  return { getDatabaseName: () => 'test', connectionManager: {
+    config: { replication: false, host: 'db' },
+    connect: async config => { assert.equal(config.host, 'db'); return connection; },
+    disconnect: async c => { assert.equal(c, connection); await onDisconnect(); },
+    getConnection: async () => assert.fail('lock must not take a pooled connection'),
+  } };
+}
+
+for (const acquired of [0, 1]) test(`database lock acquired=${acquired} protects sweep and closes its own connection`, async () => {
+  const queries = []; let ran = false, closed = false, errorHandler;
+  const connection = { on: (event, handler) => { errorHandler = handler; }, query(sql, params, callback) { queries.push(sql); callback(null, [{ acquired }]); } };
+  const result = withSyncLock(lockSequelize(connection, { onDisconnect: async () => { closed = true; } }), async () => { ran = true; throw Error('sweep failed'); });
   if (acquired) await assert.rejects(result, /sweep failed/); else await result;
-  assert.equal(ran, Boolean(acquired)); assert.equal(released, true); assert.equal(queries.length, acquired ? 2 : 1);
+  assert.equal(ran, Boolean(acquired)); assert.equal(closed, true); assert.equal(queries.length, 1);
+  assert.equal(typeof errorHandler, 'function');
 });
 
 test('disabled scheduler does not load database or start work', async () => {
@@ -88,17 +98,23 @@ for (const edit of [{ status: 'cancelled' }, { note: 'Staff added a note' }, { c
   assert.notEqual(f.row.status, 'delivered');
 });
 
- test('failed lock release destroys the connection instead of pooling a locked session', async () => {
+ test('failed lock close destroys the session so the lock cannot outlive the sweep', async () => {
   let destroyed = false;
-  const connection = { query(sql, params, callback) {
-    if (sql.includes('RELEASE_LOCK')) callback(Error('connection lost'));
-    else callback(null, [{ acquired: 1 }]);
-  } };
-  const sequelize = { getDatabaseName: () => 'test', connectionManager: {
-    getConnection: async () => connection,
-    releaseConnection: async () => assert.fail('must not pool locked connection'),
-    destroyConnection: async c => { assert.equal(c, connection); destroyed = true; },
-  } };
-  await assert.rejects(withSyncLock(sequelize, async () => {}), /connection lost/);
+  const connection = { on() {}, destroy: () => { destroyed = true; }, query(sql, params, callback) { callback(null, [{ acquired: 1 }]); } };
+  await withSyncLock(lockSequelize(connection, { onDisconnect: async () => { throw Error('connection lost'); } }), async () => {});
   assert.equal(destroyed, true);
+});
+
+test('sweep only covers orders created within the max age window', async () => {
+  let createdAfter;
+  const now = Date.parse('2026-10-22T00:00:00Z');
+  await syncCourierOrders({ Order: { max: async () => 5, findAll: async ({ where }) => { createdAfter = where.createdAt[Op.gte]; return []; } },
+    service: {}, maxAgeDays: 30, now: () => now });
+  assert.equal(createdAfter.toISOString(), '2026-09-22T00:00:00.000Z');
+});
+
+test('max age comes from COURIER_SYNC_MAX_AGE_DAYS and falls back to 30 days', () => {
+  assert.equal(getMaxAgeDays({ COURIER_SYNC_MAX_AGE_DAYS: '45' }), 45);
+  assert.equal(getMaxAgeDays({ COURIER_SYNC_MAX_AGE_DAYS: 'abc' }), 30);
+  assert.equal(getMaxAgeDays({}), 30);
 });

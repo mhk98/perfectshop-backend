@@ -1,5 +1,5 @@
 const db = require("../db/db");
-const { DataTypes } = require("sequelize");
+const { DataTypes, Op } = require("sequelize");
 
 // =====================
 // Define models
@@ -929,15 +929,19 @@ const ensureOrderPhoneLookupIndexes = async () => {
   }
 
   // Backfill rows created before phoneKey existed (includes soft-deleted).
+  // The Id cursor guarantees the loop ends even if a row fails to update.
+  let cursor = 0;
   for (;;) {
     const rows = await db.order.findAll({
       attributes: ["Id", "customerPhone"],
-      where: { phoneKey: null },
+      where: { phoneKey: null, Id: { [Op.gt]: cursor } },
+      order: [["Id", "ASC"]],
       limit: 500,
       paranoid: false,
       raw: true,
     });
     if (!rows.length) break;
+    cursor = rows[rows.length - 1].Id;
     await Promise.all(
       rows.map((row) =>
         db.order.update(
@@ -946,6 +950,31 @@ const ensureOrderPhoneLookupIndexes = async () => {
         ),
       ),
     );
+  }
+};
+
+// Indexes for the hot order queries: status tabs + counts + courier sync
+// (status, Id), date filters on list/dashboard/reports (orderDate), employee
+// scope (assignedEmployeeId, status) and checkout block rules (ipAddress,
+// deviceId). Runs after the columns they cover have been ensured.
+const ORDER_QUERY_INDEXES = [
+  { name: "orders_status_id_idx", fields: ["status", "Id"] },
+  { name: "orders_order_date_idx", fields: ["orderDate"] },
+  { name: "orders_assigned_status_idx", fields: ["assignedEmployeeId", "status"] },
+  { name: "orders_ip_address_idx", fields: ["ipAddress"] },
+  { name: "orders_device_id_idx", fields: ["deviceId"] },
+];
+
+const ensureOrderQueryIndexes = async () => {
+  const queryInterface = db.sequelize.getQueryInterface();
+  const tableName = db.order.getTableName();
+  const indexNames = (await queryInterface.showIndex(tableName)).map(
+    (index) => index.name,
+  );
+  for (const { name, fields } of ORDER_QUERY_INDEXES) {
+    if (!indexNames.includes(name)) {
+      await queryInterface.addIndex(tableName, fields, { name });
+    }
   }
 };
 
@@ -989,7 +1018,7 @@ const ensureOrderAssignmentColumns = async () => {
 // Sync
 // =====================
 
-db.ready = db.sequelize
+const initializeDatabase = () => db.sequelize
   .sync({ force: false })
   .then(async () => {
     await ensureUserRoleColumn();
@@ -1031,6 +1060,7 @@ db.ready = db.sequelize
     await ensureOrderFraudGuardColumns();
     await ensureOrderPhoneLookupIndexes();
     await ensureOrderAssignmentColumns();
+    await ensureOrderQueryIndexes();
     await ensureLandingPageContentColumns();
     console.log("Connection re-synced successfully");
   })
@@ -1038,5 +1068,20 @@ db.ready = db.sequelize
     console.error("Error on re-sync:", err);
     throw err;
   });
+
+// Retry-safe: a failed attempt is forgotten so the next call starts over
+// (server.js keeps retrying instead of exiting while the database is down).
+let initialization = null;
+db.initialize = () => {
+  initialization ||= initializeDatabase().catch((err) => {
+    initialization = null;
+    throw err;
+  });
+  return initialization;
+};
+db.ready = db.initialize();
+// Callers that await db.ready still see the error; this only stops an
+// unawaited rejection from crashing the process.
+db.ready.catch(() => {});
 
 module.exports = db;

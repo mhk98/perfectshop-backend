@@ -39,7 +39,9 @@ const sequelize = new Sequelize(
   },
 );
 
-// Test the connection
+// Test the connection. Never exit on failure: the host restarts a dead process
+// immediately, and each restart burns CPU and another MySQL connection attempt.
+// server.js retries with backoff instead.
 sequelize
   .authenticate()
   .then(() => {
@@ -51,7 +53,6 @@ sequelize
     console.error("DB_NAME:", process.env.DB_NAME || "NOT SET");
     console.error("DB_USER:", process.env.DB_USER || "NOT SET");
     console.error("DB_PORT:", process.env.DB_PORT || "NOT SET");
-    process.exit(1);
   });
 
 const db = {};

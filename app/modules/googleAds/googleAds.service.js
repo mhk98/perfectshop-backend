@@ -2,6 +2,7 @@ const { Op } = require("sequelize");
 const paginationHelpers = require("../../../helpers/paginationHelper");
 const db = require("../../../models");
 const ApiError = require("../../../error/ApiError");
+const { clearTrackingCache } = require("../tracking/tracking.cache");
 const M = () => db.googleAds;
 
 const normalizePayload = (data = {}) => {
@@ -32,7 +33,9 @@ const ensureUnique = async (conversionId, conversionLabel, excludeId) => {
 const insertIntoDB = async (data) => {
   const payload = normalizePayload(data);
   await ensureUnique(payload.conversionId, payload.conversionLabel);
-  return M().create(payload);
+  const row = await M().create(payload);
+  clearTrackingCache();
+  return row;
 };
 
 const getAllFromDB = async (filters, options) => {
@@ -76,6 +79,7 @@ const updateOneFromDB = async (id, payload) => {
   const data = normalizePayload(merged);
   await ensureUnique(data.conversionId, data.conversionLabel, row.Id);
   await row.update(data);
+  clearTrackingCache();
   return row;
 };
 
@@ -83,6 +87,7 @@ const deleteIdFromDB = async (id) => {
   const row = await M().findOne({ where: { Id: id } });
   if (!row) throw new ApiError(404, "Google Ads config not found");
   await row.destroy();
+  clearTrackingCache();
   return { deleted: true };
 };
 
