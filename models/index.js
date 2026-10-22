@@ -901,6 +901,54 @@ const ensureOrderFraudGuardColumns = async () => {
   });
 };
 
+// Repeat-order and Fraud Guard lookups on the orders list query by phone;
+// without these indexes every lookup scans the whole orders table.
+const ensureOrderPhoneLookupIndexes = async () => {
+  const queryInterface = db.sequelize.getQueryInterface();
+  const tableName = db.order.getTableName();
+  const tableDefinition = await queryInterface.describeTable(tableName);
+  if (!hasColumn(tableDefinition, "phoneKey")) {
+    await queryInterface.addColumn(tableName, "phoneKey", {
+      type: DataTypes.STRING(16),
+      allowNull: true,
+    });
+  }
+
+  const indexNames = (await queryInterface.showIndex(tableName)).map(
+    (index) => index.name,
+  );
+  if (!indexNames.includes("orders_phone_key_id_idx")) {
+    await queryInterface.addIndex(tableName, ["phoneKey", "Id"], {
+      name: "orders_phone_key_id_idx",
+    });
+  }
+  if (!indexNames.includes("orders_customer_phone_idx")) {
+    await queryInterface.addIndex(tableName, ["customerPhone"], {
+      name: "orders_customer_phone_idx",
+    });
+  }
+
+  // Backfill rows created before phoneKey existed (includes soft-deleted).
+  for (;;) {
+    const rows = await db.order.findAll({
+      attributes: ["Id", "customerPhone"],
+      where: { phoneKey: null },
+      limit: 500,
+      paranoid: false,
+      raw: true,
+    });
+    if (!rows.length) break;
+    await Promise.all(
+      rows.map((row) =>
+        db.order.update(
+          { phoneKey: db.order.toPhoneKey(row.customerPhone) },
+          { where: { Id: row.Id }, paranoid: false, hooks: false, silent: true },
+        ),
+      ),
+    );
+  }
+};
+
 const ensureOrderAssignmentColumns = async () => {
   const queryInterface = db.sequelize.getQueryInterface();
   const tableName = db.order.getTableName();
@@ -981,6 +1029,7 @@ db.ready = db.sequelize
     await ensureOrderSourceColumn();
     await ensureOrderStatusColumn();
     await ensureOrderFraudGuardColumns();
+    await ensureOrderPhoneLookupIndexes();
     await ensureOrderAssignmentColumns();
     await ensureLandingPageContentColumns();
     console.log("Connection re-synced successfully");

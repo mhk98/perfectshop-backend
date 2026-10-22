@@ -1176,7 +1176,52 @@ const validateOrderStatus = async (status) => {
   return key;
 };
 
+// Phone whose order history decides the Fraud Guard, or "" when the order's
+// own manual mark (or a missing phone) already decides it.
+const getFraudHistoryPhone = (plainOrder = {}) => {
+  const manualStatus = normalizeFraudStatus(plainOrder.fraudStatus);
+  if (manualStatus === "fake" || manualStatus === "safe") return "";
+  return String(plainOrder.customerPhone || "").trim();
+};
+
+const fetchFraudHistoryRows = (phones) =>
+  Order.findAll({
+    attributes: ["customerPhone", "status", "fraudStatus", "fraudReason"],
+    where: { customerPhone: { [Op.in]: phones } },
+    raw: true,
+    paranoid: true,
+  });
+
 const getFraudGuardForOrder = async (plainOrder = {}) => {
+  const phone = getFraudHistoryPhone(plainOrder);
+  const rows = phone ? await fetchFraudHistoryRows([phone]) : [];
+  return evaluateFraudGuard(plainOrder, rows);
+};
+
+// One history query for a whole page of orders instead of one per order.
+const getFraudGuardsForOrders = async (plainOrders = []) => {
+  const phones = [
+    ...new Set(plainOrders.map(getFraudHistoryPhone).filter(Boolean)),
+  ];
+  const rowsByPhone = new Map();
+  if (phones.length) {
+    for (const row of await fetchFraudHistoryRows(phones)) {
+      // MySQL's default collation compares phones case- and trailing-space-
+      // insensitively, so group the same way the single-order query matched.
+      const key = String(row.customerPhone || "").trim().toLowerCase();
+      if (!rowsByPhone.has(key)) rowsByPhone.set(key, []);
+      rowsByPhone.get(key).push(row);
+    }
+  }
+  return plainOrders.map((plainOrder) =>
+    evaluateFraudGuard(
+      plainOrder,
+      rowsByPhone.get(getFraudHistoryPhone(plainOrder).toLowerCase()) || [],
+    ),
+  );
+};
+
+const evaluateFraudGuard = (plainOrder = {}, rows = []) => {
   const manualStatus = normalizeFraudStatus(plainOrder.fraudStatus);
   if (manualStatus === "fake") {
     return {
@@ -1197,15 +1242,6 @@ const getFraudGuardForOrder = async (plainOrder = {}) => {
   if (!phone) {
     return { status: "safe", label: "Safe", reason: "No previous risk found" };
   }
-
-  const rows = await Order.findAll({
-    attributes: ["status", "fraudStatus", "fraudReason"],
-    where: {
-      customerPhone: phone,
-    },
-    raw: true,
-    paranoid: true,
-  });
 
   const manuallyFake = rows.find((row) => normalizeFraudStatus(row.fraudStatus) === "fake");
   if (manuallyFake) {
@@ -1245,6 +1281,30 @@ const getFraudGuardForOrder = async (plainOrder = {}) => {
     failedCount,
     deliveredCount,
   };
+};
+
+// How many earlier orders each order's phone has, from one indexed query on
+// phoneKey (last 11 digits) for the whole page.
+const getPreviousOrderCounts = async (plainOrders = []) => {
+  const keys = plainOrders.map((plain) => Order.toPhoneKey(plain.customerPhone));
+  const uniqueKeys = [...new Set(keys.filter(Boolean))];
+  if (!uniqueKeys.length) return keys.map(() => 0);
+
+  const maxId = Math.max(...plainOrders.map((plain) => Number(plain.Id) || 0));
+  const history = await Order.findAll({
+    attributes: ["Id", "phoneKey"],
+    where: { phoneKey: { [Op.in]: uniqueKeys }, Id: { [Op.lt]: maxId } },
+    raw: true,
+    paranoid: true,
+  });
+
+  return plainOrders.map((plain, index) =>
+    keys[index]
+      ? history.filter(
+          (row) => row.phoneKey === keys[index] && row.Id < Number(plain.Id),
+        ).length
+      : 0,
+  );
 };
 
 const getOrdersFromDB = async (filters, paginationOptions, currentUser = {}) => {
@@ -1294,27 +1354,22 @@ const getOrdersFromDB = async (filters, paginationOptions, currentUser = {}) => 
     order: [[sortBy || "Id", sortOrder || "DESC"]],
   });
 
-  const rowsWithRepeatInfo = await Promise.all(
-    rows.map(async (row) => {
-      const plain = typeof row.toJSON === "function" ? row.toJSON() : row;
-      const phone = normalizePhone(plain.customerPhone);
-      const previousOrderCount = phone
-        ? await Order.count({
-            where: {
-              Id: { [Op.lt]: plain.Id },
-              customerPhone: { [Op.like]: `%${phone.slice(-11) || phone}%` },
-            },
-            paranoid: true,
-          })
-        : 0;
-      return {
-        ...withAssignmentUsers(plain),
-        isRepeat: previousOrderCount > 0,
-        previousOrderCount,
-        fraudGuard: await getFraudGuardForOrder(plain),
-      };
-    }),
+  const plainRows = rows.map((row) =>
+    typeof row.toJSON === "function" ? row.toJSON() : row,
   );
+  const [previousOrderCounts, fraudGuards] = await Promise.all([
+    getPreviousOrderCounts(plainRows),
+    getFraudGuardsForOrders(plainRows),
+  ]);
+  const rowsWithRepeatInfo = plainRows.map((plain, index) => {
+    const previousOrderCount = previousOrderCounts[index];
+    return {
+      ...withAssignmentUsers(plain),
+      isRepeat: previousOrderCount > 0,
+      previousOrderCount,
+      fraudGuard: fraudGuards[index],
+    };
+  });
 
   return {
     meta: { page, limit, total: count },

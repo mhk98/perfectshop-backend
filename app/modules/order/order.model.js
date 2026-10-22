@@ -25,6 +25,12 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(32),
         allowNull: false,
       },
+      // Last 11 digits of customerPhone, indexed so repeat-customer lookups
+      // can use equality instead of a full-table LIKE scan.
+      phoneKey: {
+        type: DataTypes.STRING(16),
+        allowNull: true,
+      },
       ipAddress: {
         type: DataTypes.STRING(128),
         allowNull: true,
@@ -131,8 +137,21 @@ module.exports = (sequelize, DataTypes) => {
     {
       timestamps: true,
       paranoid: true,
+      hooks: {
+        beforeSave(order) {
+          if (order.isNewRecord || order.changed("customerPhone")) {
+            order.phoneKey = toOrderPhoneKey(order.customerPhone);
+          }
+        },
+      },
     }
   );
 
+  Order.toPhoneKey = toOrderPhoneKey;
+
   return Order;
 };
+
+function toOrderPhoneKey(phone) {
+  return String(phone || "").replace(/\D/g, "").slice(-11);
+}
