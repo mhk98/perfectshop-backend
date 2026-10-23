@@ -103,6 +103,8 @@ const HOLYDEEN_DASHBOARD_MENU_PERMISSIONS = [
   "admin_permissions",
   "customers",
   "ip_block",
+  "scratch_card",
+  "scratch_card_repeat",
   "website_setting",
   "api_integration",
   "marketing_tools",
@@ -113,6 +115,31 @@ const HOLYDEEN_DASHBOARD_MENU_PERMISSIONS = [
   "cache_clear",
 ];
 
+// Pages inside a dashboard section, granted one by one as "<section>.<page>".
+// The section key alone still grants every page in it; once a role has any
+// page key of a section, it gets only the pages it has.
+const MENU_SUB_PERMISSIONS = {
+  products: ["product_manage", "categories", "subcategories", "childcategories", "brands", "colors", "attribute", "barcode", "reviews"],
+  supplier: ["supplier_list", "supplier_add", "payment_add", "payment_list"],
+  purchase: ["purchase_list", "purchase_add"],
+  website_setting: ["general_setting", "order_block", "website_footer", "social_media", "contact", "shipping_charge", "order_status", "create_page"],
+  api_integration: ["courier_api", "payment_gateway", "sms_gateway", "fraud_checker_api"],
+  marketing_tools: ["tag_manager", "facebook_pixels", "tiktok_pixels", "google_ads", "coupon_code", "sms_marketing", "facebook_catalogue", "visitor_reports"],
+  banner_ads: ["banner_category", "banner_ads"],
+  expense: ["expense_categories", "expense"],
+  reports: ["stock_report", "stock_alert_report", "purchase_report", "order_reports", "sales_reports", "expense_reports", "loss_profit"],
+};
+
+// Each section key is followed by its page keys.
+HOLYDEEN_DASHBOARD_MENU_PERMISSIONS.splice(
+  0,
+  HOLYDEEN_DASHBOARD_MENU_PERMISSIONS.length,
+  ...HOLYDEEN_DASHBOARD_MENU_PERMISSIONS.flatMap((section) => [
+    section,
+    ...(MENU_SUB_PERMISSIONS[section] || []).map((page) => `${section}.${page}`),
+  ]),
+);
+
 const ALL_VALID_MENU_PERMISSIONS = [
   ...new Set([...ALL_MENU_PERMISSIONS, ...HOLYDEEN_DASHBOARD_MENU_PERMISSIONS]),
 ];
@@ -121,5 +148,6 @@ module.exports = {
   MENU_PERMISSIONS,
   ALL_MENU_PERMISSIONS,
   HOLYDEEN_DASHBOARD_MENU_PERMISSIONS,
+  MENU_SUB_PERMISSIONS,
   ALL_VALID_MENU_PERMISSIONS,
 };

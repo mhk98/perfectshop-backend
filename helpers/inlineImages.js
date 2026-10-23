@@ -1,13 +1,14 @@
 const crypto = require("crypto");
 const {
-  isCloudinaryEnabled,
-  uploadToCloudinary,
-} = require("./cloudinary");
+  isStorageEnabled,
+  uploadFile,
+  STORAGE_NOT_CONFIGURED_MESSAGE,
+} = require("./storage");
 const ApiError = require("../error/ApiError");
 
 // The admin panel reads image inputs with FileReader.readAsDataURL and sends
 // them as base64 strings. Stored as-is they bloat every public API response
-// (a single category image was 3 MB), so they are uploaded to Cloudinary and
+// (a single category image was 3 MB), so they are uploaded to Spaces and
 // only the URL is kept in the database.
 
 const EXTENSION_BY_MIME = {
@@ -16,10 +17,9 @@ const EXTENSION_BY_MIME = {
   "image/png": ".png",
   "image/gif": ".gif",
   "image/webp": ".webp",
-  "image/avif": ".avif",
   "image/x-icon": ".ico",
   "image/vnd.microsoft.icon": ".ico",
-  // Served from res.cloudinary.com, so SVG scripts can't run on our origin.
+  // Served from the Spaces domain, so SVG scripts can't run on our origin.
   "image/svg+xml": ".svg",
 };
 
@@ -35,12 +35,12 @@ const EMBEDDED_DATA_URI = new RegExp(`data:(${MIME_ALTERNATION});base64,[A-Za-z0
 const isInlineImage = (value) => typeof value === "string" && WHOLE_DATA_URI.test(value);
 
 const storeDataUri = async (dataUri, mime) => {
-  if (!isCloudinaryEnabled) {
-    throw new ApiError(500, "File storage is not configured (Cloudinary credentials missing)");
+  if (!isStorageEnabled) {
+    throw new ApiError(500, STORAGE_NOT_CONFIGURED_MESSAGE);
   }
   const name = `${crypto.randomUUID()}${EXTENSION_BY_MIME[mime.toLowerCase()]}`;
-  const result = await uploadToCloudinary(dataUri.replace(/\s/g, ""), name);
-  return result.secure_url;
+  const result = await uploadFile(dataUri.replace(/\s/g, ""), name);
+  return result.url;
 };
 
 const uploadOnce = (dataUri, mime, cache) => {
@@ -63,7 +63,7 @@ const replaceInString = async (value, cache) => {
 
 /**
  * Deep-walks `value` and returns a copy where every base64 image data URI —
- * whole field values or ones embedded in HTML — is replaced by its Cloudinary
+ * whole field values or ones embedded in HTML — is replaced by its Spaces
  * URL. Identical images inside one call are uploaded once.
  */
 const replaceInlineImages = async (value, cache = new Map()) => {

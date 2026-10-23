@@ -1,5 +1,6 @@
 const db = require("../db/db");
 const { DataTypes, Op } = require("sequelize");
+const { generateReferenceCode } = require("../app/modules/scratchCard/scratchCard.reference");
 
 // =====================
 // Define models
@@ -116,6 +117,10 @@ db.deliveryAdvance =
 
 // Website / Settings
 db.ipBlock = require("../app/modules/ipBlock/ipBlock.model")(
+  db.sequelize,
+  DataTypes,
+);
+db.scratchCard = require("../app/modules/scratchCard/scratchCard.model")(
   db.sequelize,
   DataTypes,
 );
@@ -661,6 +666,99 @@ const ensureGoogleAdsColumns = async () => {
   await maybeAdd("loginCustomerId", { type: DataTypes.STRING, allowNull: true });
 };
 
+const ensureScratchCardColumns = async () => {
+  const queryInterface = db.sequelize.getQueryInterface();
+  const tableName = db.scratchCard.getTableName();
+  const tableDefinition = await queryInterface.describeTable(tableName);
+  if (!hasColumn(tableDefinition, "claimType")) {
+    await queryInterface.addColumn(tableName, "claimType", {
+      type: DataTypes.STRING(16),
+      allowNull: false,
+      defaultValue: "first",
+    });
+  }
+  if (!hasColumn(tableDefinition, "referenceCode")) {
+    await queryInterface.addColumn(tableName, "referenceCode", {
+      type: DataTypes.STRING(16),
+      allowNull: true,
+    });
+  }
+  if (!hasColumn(tableDefinition, "approvedAt")) {
+    await queryInterface.addColumn(tableName, "approvedAt", {
+      type: DataTypes.DATE,
+      allowNull: true,
+    });
+    // Claims approved before this column existed: their last update is the
+    // closest record of when that happened.
+    await db.scratchCard.update(
+      { approvedAt: db.sequelize.col("updatedAt") },
+      { where: { status: { [Op.in]: ["Approved", "Delivered"] } }, paranoid: false, silent: true }
+    );
+  }
+  const assignmentColumns = {
+    assignedAgentId: DataTypes.INTEGER(10),
+    assignedAgentName: DataTypes.STRING(191),
+    assignedById: DataTypes.INTEGER(10),
+    assignedAt: DataTypes.DATE,
+    courier: DataTypes.STRING(32),
+    consignmentId: DataTypes.STRING(64),
+    trackingCode: DataTypes.STRING(64),
+    courierStatus: DataTypes.STRING(64),
+    courierSentAt: DataTypes.DATE,
+    deliveryArea: DataTypes.STRING(16),
+    codAmount: DataTypes.DECIMAL(10, 2),
+  };
+  for (const [columnName, type] of Object.entries(assignmentColumns)) {
+    if (!hasColumn(tableDefinition, columnName)) {
+      await queryInterface.addColumn(tableName, columnName, { type, allowNull: true });
+    }
+  }
+  if (!hasColumn(tableDefinition, "courierFinal")) {
+    await queryInterface.addColumn(tableName, "courierFinal", {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    });
+  }
+
+  // Claims made before reference codes existed get one now, so every claim
+  // can be found by its code in the admin panel.
+  const missing = await db.scratchCard.findAll({
+    where: { referenceCode: null },
+    attributes: ["Id"],
+    paranoid: false,
+  });
+  if (missing.length) {
+    const taken = new Set(
+      (
+        await db.scratchCard.findAll({
+          where: { referenceCode: { [Op.ne]: null } },
+          attributes: ["referenceCode"],
+          paranoid: false,
+        })
+      ).map((row) => row.referenceCode)
+    );
+    for (const row of missing) {
+      let code;
+      do code = generateReferenceCode();
+      while (taken.has(code));
+      taken.add(code);
+      await db.scratchCard.update(
+        { referenceCode: code },
+        { where: { Id: row.Id }, paranoid: false }
+      );
+    }
+  }
+
+  const indexes = await queryInterface.showIndex(tableName);
+  if (!indexes.some((index) => index.name === "scratch_cards_reference_code_unique")) {
+    await queryInterface.addIndex(tableName, ["referenceCode"], {
+      name: "scratch_cards_reference_code_unique",
+      unique: true,
+    });
+  }
+};
+
 const ensureBannerColumns = async () => {
   const queryInterface = db.sequelize.getQueryInterface();
   const tableName = db.banner.getTableName();
@@ -901,83 +999,6 @@ const ensureOrderFraudGuardColumns = async () => {
   });
 };
 
-// Repeat-order and Fraud Guard lookups on the orders list query by phone;
-// without these indexes every lookup scans the whole orders table.
-const ensureOrderPhoneLookupIndexes = async () => {
-  const queryInterface = db.sequelize.getQueryInterface();
-  const tableName = db.order.getTableName();
-  const tableDefinition = await queryInterface.describeTable(tableName);
-  if (!hasColumn(tableDefinition, "phoneKey")) {
-    await queryInterface.addColumn(tableName, "phoneKey", {
-      type: DataTypes.STRING(16),
-      allowNull: true,
-    });
-  }
-
-  const indexNames = (await queryInterface.showIndex(tableName)).map(
-    (index) => index.name,
-  );
-  if (!indexNames.includes("orders_phone_key_id_idx")) {
-    await queryInterface.addIndex(tableName, ["phoneKey", "Id"], {
-      name: "orders_phone_key_id_idx",
-    });
-  }
-  if (!indexNames.includes("orders_customer_phone_idx")) {
-    await queryInterface.addIndex(tableName, ["customerPhone"], {
-      name: "orders_customer_phone_idx",
-    });
-  }
-
-  // Backfill rows created before phoneKey existed (includes soft-deleted).
-  // The Id cursor guarantees the loop ends even if a row fails to update.
-  let cursor = 0;
-  for (;;) {
-    const rows = await db.order.findAll({
-      attributes: ["Id", "customerPhone"],
-      where: { phoneKey: null, Id: { [Op.gt]: cursor } },
-      order: [["Id", "ASC"]],
-      limit: 500,
-      paranoid: false,
-      raw: true,
-    });
-    if (!rows.length) break;
-    cursor = rows[rows.length - 1].Id;
-    await Promise.all(
-      rows.map((row) =>
-        db.order.update(
-          { phoneKey: db.order.toPhoneKey(row.customerPhone) },
-          { where: { Id: row.Id }, paranoid: false, hooks: false, silent: true },
-        ),
-      ),
-    );
-  }
-};
-
-// Indexes for the hot order queries: status tabs + counts + courier sync
-// (status, Id), date filters on list/dashboard/reports (orderDate), employee
-// scope (assignedEmployeeId, status) and checkout block rules (ipAddress,
-// deviceId). Runs after the columns they cover have been ensured.
-const ORDER_QUERY_INDEXES = [
-  { name: "orders_status_id_idx", fields: ["status", "Id"] },
-  { name: "orders_order_date_idx", fields: ["orderDate"] },
-  { name: "orders_assigned_status_idx", fields: ["assignedEmployeeId", "status"] },
-  { name: "orders_ip_address_idx", fields: ["ipAddress"] },
-  { name: "orders_device_id_idx", fields: ["deviceId"] },
-];
-
-const ensureOrderQueryIndexes = async () => {
-  const queryInterface = db.sequelize.getQueryInterface();
-  const tableName = db.order.getTableName();
-  const indexNames = (await queryInterface.showIndex(tableName)).map(
-    (index) => index.name,
-  );
-  for (const { name, fields } of ORDER_QUERY_INDEXES) {
-    if (!indexNames.includes(name)) {
-      await queryInterface.addIndex(tableName, fields, { name });
-    }
-  }
-};
-
 const ensureOrderAssignmentColumns = async () => {
   const queryInterface = db.sequelize.getQueryInterface();
   const tableName = db.order.getTableName();
@@ -1018,7 +1039,7 @@ const ensureOrderAssignmentColumns = async () => {
 // Sync
 // =====================
 
-const initializeDatabase = () => db.sequelize
+db.ready = db.sequelize
   .sync({ force: false })
   .then(async () => {
     await ensureUserRoleColumn();
@@ -1058,30 +1079,14 @@ const initializeDatabase = () => db.sequelize
     await ensureOrderSourceColumn();
     await ensureOrderStatusColumn();
     await ensureOrderFraudGuardColumns();
-    await ensureOrderPhoneLookupIndexes();
     await ensureOrderAssignmentColumns();
-    await ensureOrderQueryIndexes();
     await ensureLandingPageContentColumns();
+    await ensureScratchCardColumns();
     console.log("Connection re-synced successfully");
   })
   .catch((err) => {
     console.error("Error on re-sync:", err);
     throw err;
   });
-
-// Retry-safe: a failed attempt is forgotten so the next call starts over
-// (server.js keeps retrying instead of exiting while the database is down).
-let initialization = null;
-db.initialize = () => {
-  initialization ||= initializeDatabase().catch((err) => {
-    initialization = null;
-    throw err;
-  });
-  return initialization;
-};
-db.ready = db.initialize();
-// Callers that await db.ready still see the error; this only stops an
-// unawaited rejection from crashing the process.
-db.ready.catch(() => {});
 
 module.exports = db;

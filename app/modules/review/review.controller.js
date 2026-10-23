@@ -25,9 +25,6 @@ const getPublicApprovedReviews = catchAsync(async (req, res) => {
   const filters = pick(req.query, ["productId", "productName"]);
   const options = pick(req.query, ["limit", "page"]);
   const result = await ReviewService.getPublicApprovedReviews(filters, options);
-  // Only admin-approved reviews are listed, so a minute of browser caching
-  // hides nothing a customer just wrote.
-  res.set("Cache-Control", "public, max-age=60");
   sendResponse(res, { statusCode: 200, success: true, message: "Reviews fetched!", meta: result.meta, data: result.data });
 });
 

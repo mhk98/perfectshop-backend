@@ -1,7 +1,7 @@
 /**
  * One-time migration: move base64 image data URIs stored in the database
  * (site settings logo/favicon/footer images, category images, ...) to
- * Cloudinary and replace them with the file URL. New saves are converted by helpers/inlineImages.js.
+ * DigitalOcean Spaces and replace them with the file URL. New saves are converted by helpers/inlineImages.js.
  *
  * Original values of every changed row are written to a backup JSON file
  * before anything is updated.
@@ -15,7 +15,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 const db = require("../models");
-const { isCloudinaryEnabled } = require("../helpers/cloudinary");
+const { isStorageEnabled } = require("../helpers/storage");
 const { replaceInlineImages } = require("../helpers/inlineImages");
 
 const dryRun = process.argv.includes("--dry-run");
@@ -41,9 +41,9 @@ const byteLength = (value) =>
   Buffer.byteLength(typeof value === "string" ? value : JSON.stringify(value ?? null));
 
 async function main() {
-  console.log(`Storage: ${isCloudinaryEnabled ? "Cloudinary" : "NOT CONFIGURED"}`);
-  if (!dryRun && !isCloudinaryEnabled) {
-    console.error("\nCloudinary is not configured (CLOUDINARY_CLOUD_NAME / _API_KEY / _API_SECRET). Nothing was changed.");
+  console.log(`Storage: ${isStorageEnabled ? "DigitalOcean Spaces" : "NOT CONFIGURED"}`);
+  if (!dryRun && !isStorageEnabled) {
+    console.error("\nSpaces is not configured (DO_SPACES_KEY / _SECRET / _REGION / _BUCKET). Nothing was changed.");
     process.exit(1);
   }
 

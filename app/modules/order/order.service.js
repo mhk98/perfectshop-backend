@@ -586,12 +586,25 @@ const getPathaoConfig = async () => {
   };
 };
 
+// fetch() rejects with an AbortError when our 15s timer fires; report it as a
+// courier timeout instead of letting it surface as "Internal server error".
+const courierFetch = async (provider, url, options) => {
+  try {
+    return await fetch(url, options);
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new ApiError(504, `${provider} did not respond within 15 seconds (${new URL(url).origin}). Check the ${provider} API URL in Courier API settings.`);
+    }
+    throw new ApiError(502, `Could not reach ${provider}: ${error?.cause?.code || error.message}`);
+  }
+};
+
 const steadfastRequest = async (path, { method = "GET", body } = {}) => {
   const config = await getSteadfastConfig();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(`${config.baseUrl}${path}`, {
+    const response = await courierFetch("Steadfast", `${config.baseUrl}${path}`, {
       method,
       signal: controller.signal,
       headers: {
@@ -618,11 +631,11 @@ const steadfastRequest = async (path, { method = "GET", body } = {}) => {
   }
 };
 
-const pathaoToken = async (config) => {
+const issuePathaoToken = async (config) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(`${config.baseUrl}/aladdin/api/v1/issue-token`, {
+    const response = await courierFetch("Pathao", `${config.baseUrl}/aladdin/api/v1/issue-token`, {
       method: "POST",
       signal: controller.signal,
       headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -646,19 +659,59 @@ const pathaoToken = async (config) => {
     }
     const token = data?.access_token || data?.data?.access_token || data?.token;
     if (!token) throw new ApiError(400, "Pathao access token missing from response");
-    return token;
+    const expiresIn = Number(data?.expires_in || data?.data?.expires_in) || 3600;
+    return { token, expiresAt: Date.now() + expiresIn * 1000 };
   } finally {
     clearTimeout(timer);
   }
 };
 
-const pathaoRequest = async (path, { method = "GET", body, config, token } = {}) => {
-  const resolvedConfig = config || await getPathaoConfig();
-  const accessToken = token || await pathaoToken(resolvedConfig);
+// Issuing a token per request doubles the calls and trips Pathao's rate limit,
+// so reuse it until shortly before it expires. Concurrent callers share one issue.
+const pathaoTokenCache = new Map();
+const pathaoTokenKey = (config) => [config.baseUrl, config.clientId, config.username].join("|");
+
+const pathaoToken = async (config) => {
+  const key = pathaoTokenKey(config);
+  const cached = pathaoTokenCache.get(key);
+  if (cached && (cached.pending || cached.expiresAt - 60000 > Date.now())) {
+    return cached.pending || cached.token;
+  }
+  const pending = issuePathaoToken(config).then((issued) => {
+    pathaoTokenCache.set(key, issued);
+    return issued.token;
+  }, (error) => {
+    pathaoTokenCache.delete(key);
+    throw error;
+  });
+  pathaoTokenCache.set(key, { pending });
+  return pending;
+};
+
+const clearPathaoToken = (config, token) => {
+  const key = pathaoTokenKey(config);
+  if (pathaoTokenCache.get(key)?.token === token) pathaoTokenCache.delete(key);
+};
+
+const pathaoRequest = async (path, options = {}) => {
+  const config = options.config || await getPathaoConfig();
+  const token = options.token || await pathaoToken(config);
+  try {
+    return await sendPathaoRequest(path, { ...options, config, token });
+  } catch (error) {
+    // A cached token can be revoked before it expires; issue a fresh one once.
+    if (error?.statusCode !== 401) throw error;
+    clearPathaoToken(config, token);
+    if (options.token) throw error;
+    return sendPathaoRequest(path, { ...options, config, token: await pathaoToken(config) });
+  }
+};
+
+const sendPathaoRequest = async (path, { method = "GET", body, config: resolvedConfig, token: accessToken }) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(`${resolvedConfig.baseUrl}${path}`, {
+    const response = await courierFetch("Pathao", `${resolvedConfig.baseUrl}${path}`, {
       method,
       signal: controller.signal,
       headers: {
@@ -690,6 +743,8 @@ const pathaoRequestFirst = async (paths, options = {}) => {
     try {
       return await pathaoRequest(path, options);
     } catch (error) {
+      // The fallback path would only be rate limited too.
+      if (error?.statusCode === 429) throw error;
       lastError = error;
     }
   }
@@ -1176,52 +1231,7 @@ const validateOrderStatus = async (status) => {
   return key;
 };
 
-// Phone whose order history decides the Fraud Guard, or "" when the order's
-// own manual mark (or a missing phone) already decides it.
-const getFraudHistoryPhone = (plainOrder = {}) => {
-  const manualStatus = normalizeFraudStatus(plainOrder.fraudStatus);
-  if (manualStatus === "fake" || manualStatus === "safe") return "";
-  return String(plainOrder.customerPhone || "").trim();
-};
-
-const fetchFraudHistoryRows = (phones) =>
-  Order.findAll({
-    attributes: ["customerPhone", "status", "fraudStatus", "fraudReason"],
-    where: { customerPhone: { [Op.in]: phones } },
-    raw: true,
-    paranoid: true,
-  });
-
 const getFraudGuardForOrder = async (plainOrder = {}) => {
-  const phone = getFraudHistoryPhone(plainOrder);
-  const rows = phone ? await fetchFraudHistoryRows([phone]) : [];
-  return evaluateFraudGuard(plainOrder, rows);
-};
-
-// One history query for a whole page of orders instead of one per order.
-const getFraudGuardsForOrders = async (plainOrders = []) => {
-  const phones = [
-    ...new Set(plainOrders.map(getFraudHistoryPhone).filter(Boolean)),
-  ];
-  const rowsByPhone = new Map();
-  if (phones.length) {
-    for (const row of await fetchFraudHistoryRows(phones)) {
-      // MySQL's default collation compares phones case- and trailing-space-
-      // insensitively, so group the same way the single-order query matched.
-      const key = String(row.customerPhone || "").trim().toLowerCase();
-      if (!rowsByPhone.has(key)) rowsByPhone.set(key, []);
-      rowsByPhone.get(key).push(row);
-    }
-  }
-  return plainOrders.map((plainOrder) =>
-    evaluateFraudGuard(
-      plainOrder,
-      rowsByPhone.get(getFraudHistoryPhone(plainOrder).toLowerCase()) || [],
-    ),
-  );
-};
-
-const evaluateFraudGuard = (plainOrder = {}, rows = []) => {
   const manualStatus = normalizeFraudStatus(plainOrder.fraudStatus);
   if (manualStatus === "fake") {
     return {
@@ -1242,6 +1252,15 @@ const evaluateFraudGuard = (plainOrder = {}, rows = []) => {
   if (!phone) {
     return { status: "safe", label: "Safe", reason: "No previous risk found" };
   }
+
+  const rows = await Order.findAll({
+    attributes: ["status", "fraudStatus", "fraudReason"],
+    where: {
+      customerPhone: phone,
+    },
+    raw: true,
+    paranoid: true,
+  });
 
   const manuallyFake = rows.find((row) => normalizeFraudStatus(row.fraudStatus) === "fake");
   if (manuallyFake) {
@@ -1281,30 +1300,6 @@ const evaluateFraudGuard = (plainOrder = {}, rows = []) => {
     failedCount,
     deliveredCount,
   };
-};
-
-// How many earlier orders each order's phone has, from one indexed query on
-// phoneKey (last 11 digits) for the whole page.
-const getPreviousOrderCounts = async (plainOrders = []) => {
-  const keys = plainOrders.map((plain) => Order.toPhoneKey(plain.customerPhone));
-  const uniqueKeys = [...new Set(keys.filter(Boolean))];
-  if (!uniqueKeys.length) return keys.map(() => 0);
-
-  const maxId = Math.max(...plainOrders.map((plain) => Number(plain.Id) || 0));
-  const history = await Order.findAll({
-    attributes: ["Id", "phoneKey"],
-    where: { phoneKey: { [Op.in]: uniqueKeys }, Id: { [Op.lt]: maxId } },
-    raw: true,
-    paranoid: true,
-  });
-
-  return plainOrders.map((plain, index) =>
-    keys[index]
-      ? history.filter(
-          (row) => row.phoneKey === keys[index] && row.Id < Number(plain.Id),
-        ).length
-      : 0,
-  );
 };
 
 const getOrdersFromDB = async (filters, paginationOptions, currentUser = {}) => {
@@ -1354,22 +1349,27 @@ const getOrdersFromDB = async (filters, paginationOptions, currentUser = {}) => 
     order: [[sortBy || "Id", sortOrder || "DESC"]],
   });
 
-  const plainRows = rows.map((row) =>
-    typeof row.toJSON === "function" ? row.toJSON() : row,
+  const rowsWithRepeatInfo = await Promise.all(
+    rows.map(async (row) => {
+      const plain = typeof row.toJSON === "function" ? row.toJSON() : row;
+      const phone = normalizePhone(plain.customerPhone);
+      const previousOrderCount = phone
+        ? await Order.count({
+            where: {
+              Id: { [Op.lt]: plain.Id },
+              customerPhone: { [Op.like]: `%${phone.slice(-11) || phone}%` },
+            },
+            paranoid: true,
+          })
+        : 0;
+      return {
+        ...withAssignmentUsers(plain),
+        isRepeat: previousOrderCount > 0,
+        previousOrderCount,
+        fraudGuard: await getFraudGuardForOrder(plain),
+      };
+    }),
   );
-  const [previousOrderCounts, fraudGuards] = await Promise.all([
-    getPreviousOrderCounts(plainRows),
-    getFraudGuardsForOrders(plainRows),
-  ]);
-  const rowsWithRepeatInfo = plainRows.map((plain, index) => {
-    const previousOrderCount = previousOrderCounts[index];
-    return {
-      ...withAssignmentUsers(plain),
-      isRepeat: previousOrderCount > 0,
-      previousOrderCount,
-      fraudGuard: fraudGuards[index],
-    };
-  });
 
   return {
     meta: { page, limit, total: count },
@@ -2219,6 +2219,18 @@ const OrderService = {
   getSteadfastReturnRequestsFromProvider,
   getSteadfastPaymentsFromProvider,
   getSteadfastPoliceStationsFromProvider,
+  // Shared with scratch card prize delivery, which uses the same courier accounts.
+  courierClient: {
+    steadfastRequest,
+    getPathaoConfig,
+    pathaoToken,
+    pathaoRequest,
+    pathaoRequestFirst,
+    normalizeCourierPhone,
+    compactObject,
+    mapSteadfastStatusToOrderStatus,
+    mapPathaoStatusToOrderStatus,
+  },
 };
 
 module.exports = OrderService;

@@ -10,6 +10,9 @@ const categoryType = (name = "") => {
   if (value.includes("main slider") || value === "slider") return "slider";
   if (value.includes("slider right") || value.includes("side banner") || value === "side") return "side";
   if (value.includes("popup")) return "popup";
+  if (value.includes("scratch card") || value.includes("scratch-card")) {
+    return value.includes("mobile") ? "scratch_card_mobile" : "scratch_card";
+  }
   return "custom";
 };
 
@@ -27,33 +30,20 @@ const toPublicItem = (row) => {
   };
 };
 
-// Multipart bodies send everything as strings, so "undefined"/"null"/"" mean "not set".
-const text = (value) => {
-  if (value === undefined || value === null || typeof value === "object") return null;
-  const str = String(value).trim();
-  return str && str !== "undefined" && str !== "null" ? str : null;
-};
-
-const INACTIVE_STATUSES = new Set(["inactive", "false", "0"]);
-
 const normalizePayload = async (payload = {}, file) => {
-  const categoryIdInput = Number(text(payload.categoryId));
   let category = null;
-  if (categoryIdInput) {
-    category = await db.bannerCategory.findOne({ where: { Id: categoryIdInput } });
+  if (payload.categoryId) {
+    category = await db.bannerCategory.findOne({ where: { Id: payload.categoryId } });
   }
 
-  const categoryName = category?.name || text(payload.categoryName) || text(payload.category);
-  const sortOrder = Number(text(payload.sortOrder));
-
   return {
-    linkUrl: text(payload.linkUrl) || text(payload.link),
-    categoryId: category?.Id || categoryIdInput || null,
-    categoryName,
-    file: file?.filename || text(payload.file) || text(payload.imageName),
-    alt: text(payload.alt) || text(payload.imageText) || categoryName,
-    status: INACTIVE_STATUSES.has(String(payload.status).toLowerCase()) ? "Inactive" : "Active",
-    sortOrder: Number.isFinite(sortOrder) ? sortOrder : 0,
+    linkUrl: payload.linkUrl || payload.link || null,
+    categoryId: category?.Id || (payload.categoryId ? Number(payload.categoryId) : null),
+    categoryName: category?.name || payload.categoryName || payload.category || null,
+    file: file?.filename || payload.file || payload.imageName || null,
+    alt: payload.alt || payload.imageText || payload.categoryName || payload.category || null,
+    status: payload.status === false || payload.status === "Inactive" ? "Inactive" : "Active",
+    sortOrder: payload.sortOrder || payload.sortOrder === 0 ? Number(payload.sortOrder) : 0,
   };
 };
 
@@ -106,9 +96,7 @@ const getDataById = async (id) => {
 
 const updateOneFromDB = async (id, payload, file) => {
   const row = await getDataById(id);
-  // Drop the joined `category` object so it can't leak into string columns.
-  const { category, ...current } = row.toJSON();
-  const data = await normalizePayload({ ...current, ...payload }, file);
+  const data = await normalizePayload({ ...row.toJSON(), ...payload }, file);
   await row.update(data);
   return getDataById(id);
 };

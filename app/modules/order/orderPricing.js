@@ -290,4 +290,5 @@ module.exports = {
   resolveStaffItems,
   calculateStaffTotals,
   getLandingOptions,
+  getWebsiteDeliveryCharge,
 };

@@ -240,15 +240,11 @@ const getEffectiveMenuPermissions = async (role) => {
     where: { role: normalizedRole },
   });
 
-  if (!record) {
-    // Fallback to configured defaults when no explicit role-permission record exists.
-    // This keeps the UI navigable out of the box and prevents empty permission sets.
-    return validateMenuPermissions(getDefaultPermissionsForRole(normalizedRole));
-  }
-
-  const effectivePermissions = validateMenuPermissions(
-    includeNewSettingsChildren(normalizedRole, record.menuPermissions || []),
-  );
+  // Fallback to configured defaults when no explicit role-permission record exists.
+  // This keeps the UI navigable out of the box and prevents empty permission sets.
+  const effectivePermissions = record
+    ? validateMenuPermissions(includeNewSettingsChildren(normalizedRole, record.menuPermissions || []))
+    : validateMenuPermissions(getDefaultPermissionsForRole(normalizedRole));
 
   // Super admin always receives every dashboard capability, including newly
   // introduced menu permissions that may not exist in an older DB record.

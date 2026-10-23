@@ -36,6 +36,10 @@ const createOrder = catchAsync(async (req, res) => {
         ...(req.body.tracking || {}),
         name: result.customerName,
         phone: result.customerPhone,
+        address: result.customerAddress,
+        district: result.customerDistrict,
+        city: result.customerDistrict === "inside" ? "Dhaka" : result.customerDistrict,
+        country: "bd",
         customerId: result.customerId,
       },
       customData: {

@@ -2,6 +2,52 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const { Op } = require('sequelize');
+const { createCourierSyncWorker } = require('../app/modules/order/courierSync.worker');
+
+test('worker paginates, isolates failures and prevents overlapping sweeps', async () => {
+  const calls = [];
+  let pages = 0;
+  const worker = createCourierSyncWorker({
+    Order: { async findAll({ where, limit }) {
+      assert.deepEqual(where.status[Op.in], ['in_courier', 'on_hold']);
+      assert.equal(limit, 100);
+      pages++;
+      return where.Id[Op.gt] === 0 ? [{ Id: 1, courier: 'Steadfast' }, { Id: 2, courier: 'Pathao' }]
+        : where.Id[Op.gt] === 2 ? [{ Id: 3, courier: 'Steadfast' }] : [];
+    } },
+    service: {
+      async syncSteadfastStatusInDB(id, options) { assert.equal(options.automatic, true); calls.push(id); if (id === 1) throw Error('unavailable'); },
+      async syncPathaoStatusInDB(id) { calls.push(id); },
+    }, logger: { warn() {}, error() {} }, delayMs: 0,
+  });
+  await Promise.all([worker.run(), worker.run()]);
+  assert.deepEqual(calls, [1, 2, 3]);
+  assert.equal(pages, 3);
+  await worker.stop();
+  await worker.run();
+  assert.equal(pages, 3);
+});
+
+test('worker spaces lookups and stops the sweep when rate limited', async () => {
+  const calls = [];
+  const waits = [];
+  const worker = createCourierSyncWorker({
+    Order: { async findAll({ where }) {
+      return where.Id[Op.gt] === 0 ? [1, 2, 3, 4].map((Id) => ({ Id, courier: 'Pathao' })) : [];
+    } },
+    service: { async syncPathaoStatusInDB(id) {
+      calls.push(id);
+      if (id === 3) throw Object.assign(Error('Too Many Requests'), { statusCode: 429 });
+    } },
+    logger: { warn() {}, error() {} },
+    wait: async (ms) => { waits.push(ms); },
+  });
+  await worker.run();
+  assert.deepEqual(calls, [1, 2, 3]);
+  assert.deepEqual(waits, [400, 400]);
+  await worker.stop();
+});
 
 function setup(provider, { fail = false, changed = false, status = 'in_courier' } = {}) {
   const row = { Id: 7, orderId: 'INV7', courier: provider, status,
@@ -17,8 +63,10 @@ function setup(provider, { fail = false, changed = false, status = 'in_courier' 
       Object.assign(row, values); return [1];
     },
   } };
-  const context = { module: { exports: {} }, console, process, setTimeout, clearTimeout, AbortController,
+  const fetched = [];
+  const context = { module: { exports: {} }, console, process, setTimeout, clearTimeout, AbortController, URL, Date, Map,
     async fetch(url) {
+      fetched.push(url);
       if (fail) throw Error('courier offline');
       const data = url.includes('issue-token') ? { access_token: 'test-token' }
         : provider === 'Steadfast' ? { status: 200, delivery_status: 'delivered' }
@@ -27,6 +75,7 @@ function setup(provider, { fail = false, changed = false, status = 'in_courier' 
     },
     require(name) {
       if (name === '../../../models') return db;
+      if (name.endsWith('error/ApiError')) return require('../error/ApiError');
       if (name.includes('siteSetting.service')) return { getByType: async () => ({ data: {
         steadfast: { apiKey: 'test', secretKey: 'test' },
         pathao: { clientId: 'test', clientSecret: 'test', username: 'test', password: 'test', storeId: 1 },
@@ -38,7 +87,7 @@ function setup(provider, { fail = false, changed = false, status = 'in_courier' 
     },
   };
   vm.runInNewContext(fs.readFileSync(require.resolve('../app/modules/order/order.service'), 'utf8'), context);
-  return { row, writes: () => writes, sync: () => context.module.exports[provider === 'Steadfast' ? 'syncSteadfastStatusInDB' : 'syncPathaoStatusInDB'](7, { automatic: true }) };
+  return { row, fetched, writes: () => writes, sync: () => context.module.exports[provider === 'Steadfast' ? 'syncSteadfastStatusInDB' : 'syncPathaoStatusInDB'](7, { automatic: true }) };
 }
 for (const provider of ['Steadfast', 'Pathao']) {
   test(`${provider} delivery automatically updates order and preserves metadata`, async () => {
@@ -59,3 +108,10 @@ for (const provider of ['Steadfast', 'Pathao']) {
     assert.equal(delivered.writes(), 0);
   });
 }
+
+test('Pathao token is reused across status lookups', async () => {
+  const { sync, fetched } = setup('Pathao', { status: 'on_hold' });
+  await sync();
+  await sync();
+  assert.equal(fetched.filter((url) => url.includes('issue-token')).length, 1);
+});
