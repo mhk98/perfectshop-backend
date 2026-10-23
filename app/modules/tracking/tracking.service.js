@@ -190,8 +190,9 @@ const DIVISION_MAP = {
 };
 
 const resolveBangladeshState = (state, district, city) => {
-  const s = String(state || "").toLowerCase().trim();
-  if (s) return cleanGeoString(s);
+  // Checkout sends the district as "state"; Meta expects the division (e.g. cumilla -> chittagong).
+  const s = cleanGeoString(state);
+  if (s && s !== "outside") return DIVISION_MAP[s] || s;
 
   const key = cleanGeoString(city || district || "");
   if (key && DIVISION_MAP[key]) return DIVISION_MAP[key];
@@ -218,6 +219,16 @@ const sanitizeFbc = (fbc) => {
     return `fb.1.${Date.now()}.${str}`;
   }
   return undefined;
+};
+
+// Recover the click id from the landing URL when the browser could not persist _fbc.
+const fbcFromUrl = (url) => {
+  try {
+    const fbclid = new URL(url).searchParams.get("fbclid");
+    return fbclid ? `fb.1.${Date.now()}.${fbclid}` : undefined;
+  } catch {
+    return undefined;
+  }
 };
 
 const sanitizeFbp = (fbp) => {
@@ -384,7 +395,7 @@ const toMetaEvent = ({ eventName, eventId, eventSourceUrl, userData = {}, custom
       country: hashedCountry,
       external_id: hashedExternalIds.length ? hashedExternalIds : undefined,
       fbp: sanitizeFbp(userData.fbp),
-      fbc: sanitizeFbc(userData.fbc),
+      fbc: sanitizeFbc(userData.fbc) || sanitizeFbc(userData.fbclid) || fbcFromUrl(eventSourceUrl),
     }),
     custom_data: clean(formatCustomData(customData)),
   };

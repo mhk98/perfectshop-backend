@@ -33,6 +33,7 @@ const createOrder = catchAsync(async (req, res) => {
       eventId,
       eventSourceUrl: req.body.landingTracking.eventSourceUrl,
       userData: {
+        deviceId: req.body.deviceId,
         ...(req.body.tracking || {}),
         name: result.customerName,
         phone: result.customerPhone,
