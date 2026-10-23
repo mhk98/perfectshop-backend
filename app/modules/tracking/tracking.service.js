@@ -401,6 +401,29 @@ const toMetaEvent = ({ eventName, eventId, eventSourceUrl, userData = {}, custom
   };
 };
 
+// Pages opened on a developer machine (e.g. localhost:3000 pointed at the live API)
+// must not land in the live dataset as real conversions.
+const isDevSourceUrl = (url) => {
+  if (!url) return false;
+  try {
+    const host = new URL(url).hostname;
+    return host === "localhost" || host.endsWith(".local") || isPrivateIp(host);
+  } catch {
+    return false;
+  }
+};
+
+// Test code for this event, or null when the event has to be dropped instead.
+const resolveTestCode = (payload, configuredCode) => {
+  const devEvent = isDevSourceUrl(payload.eventSourceUrl);
+  const testCode =
+    payload.testEventCode || (process.env.NODE_ENV !== "production" || devEvent ? configuredCode : undefined);
+  if (devEvent && !testCode) return null;
+  return testCode;
+};
+
+const DEV_EVENT_SKIP_REASON = "Event from a local development URL; set a test event code to send it";
+
 const sendMeta = async (payload, context) => {
   const pixels = await FacebookPixelService.getActiveFromDB();
   const results = [];
@@ -409,7 +432,11 @@ const sendMeta = async (payload, context) => {
     if (!row.pixelsId || !row.metaAccessToken) continue;
     const apiVersion = process.env.META_GRAPH_API_VERSION || "v23.0";
     const url = `https://graph.facebook.com/${apiVersion}/${encodeURIComponent(row.pixelsId)}/events?access_token=${encodeURIComponent(row.metaAccessToken)}`;
-    const testCode = payload.testEventCode || (process.env.NODE_ENV !== "production" ? row.testEventId : undefined);
+    const testCode = resolveTestCode(payload, row.testEventId);
+    if (testCode === null) {
+      results.push({ platform: "meta", pixelId: row.pixelsId, ok: false, skipped: true, reason: DEV_EVENT_SKIP_REASON });
+      continue;
+    }
     const body = {
       data: [
         toMetaEvent({
@@ -451,7 +478,11 @@ const sendTiktok = async (payload, context) => {
   for (const pixel of pixels) {
     const row = pixel.toJSON();
     if (!row.pixelCode || !row.accessToken) continue;
-    const testCode = payload.testEventCode || (process.env.NODE_ENV !== "production" ? row.testEventCode : undefined);
+    const testCode = resolveTestCode(payload, row.testEventCode);
+    if (testCode === null) {
+      results.push({ platform: "tiktok", pixelCode: row.pixelCode, ok: false, skipped: true, reason: DEV_EVENT_SKIP_REASON });
+      continue;
+    }
     const body = {
       pixel_code: row.pixelCode,
       event_source: "web",
@@ -498,7 +529,7 @@ const getGoogleClickId = (userData = {}) =>
   userData.gclid || userData.gbraid || userData.wbraid || null;
 
 const sendGoogleAds = async (payload) => {
-  if (payload.eventName !== "Purchase") return [];
+  if (payload.eventName !== "Purchase" || isDevSourceUrl(payload.eventSourceUrl)) return [];
 
   const configs = await GoogleAdsService.getActiveFromDB();
   const results = [];
