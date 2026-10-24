@@ -288,7 +288,7 @@ const formatCustomData = (data = {}) => {
   if (Array.isArray(res.contents)) {
     res.contents = res.contents
       .map((item) => ({
-        id: String(item.id || item.productId || ""),
+        id: String(item.id || item.content_id || item.productId || ""),
         quantity: Number(item.quantity || item.qty || 1),
         item_price: Number(item.item_price || item.price || 0),
       }))
