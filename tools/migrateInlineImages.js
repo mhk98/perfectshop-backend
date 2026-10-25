@@ -1,7 +1,7 @@
 /**
  * One-time migration: move base64 image data URIs stored in the database
  * (site settings logo/favicon/footer images, category images, ...) to
- * DigitalOcean Spaces and replace them with the file URL. New saves are converted by helpers/inlineImages.js.
+ * Cloudinary and replace them with the file URL. New saves are converted by helpers/inlineImages.js.
  *
  * Original values of every changed row are written to a backup JSON file
  * before anything is updated.
@@ -41,9 +41,9 @@ const byteLength = (value) =>
   Buffer.byteLength(typeof value === "string" ? value : JSON.stringify(value ?? null));
 
 async function main() {
-  console.log(`Storage: ${isStorageEnabled ? "DigitalOcean Spaces" : "NOT CONFIGURED"}`);
+  console.log(`Storage: ${isStorageEnabled ? "Cloudinary" : "NOT CONFIGURED"}`);
   if (!dryRun && !isStorageEnabled) {
-    console.error("\nSpaces is not configured (DO_SPACES_KEY / _SECRET / _REGION / _BUCKET). Nothing was changed.");
+    console.error("\nCloudinary is not configured (CLOUDINARY_URL or CLOUDINARY_CLOUD_NAME / _API_KEY / _API_SECRET). Nothing was changed.");
     process.exit(1);
   }
 

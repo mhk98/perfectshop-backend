@@ -1,13 +1,13 @@
 /**
  * One-time migration: upload every file in UPLOAD_DIR (default ./images) to
- * DigitalOcean Spaces under the SAME name, so existing database values like
+ * Cloudinary under the SAME name, so existing database values like
  * "<uuid>.jpg" or "images/<uuid>.jpg" keep working through the /images
  * redirect in server.js. Database rows are not modified.
  *
  * Usage:
- *   node tools/migrateUploadsToSpaces.js --dry-run   # list only
- *   node tools/migrateUploadsToSpaces.js             # upload
- *   node tools/migrateUploadsToSpaces.js /path/to/uploads
+ *   node tools/migrateUploadsToCloudinary.js --dry-run   # list only
+ *   node tools/migrateUploadsToCloudinary.js             # upload
+ *   node tools/migrateUploadsToCloudinary.js /path/to/uploads
  */
 require("dotenv").config();
 
@@ -29,7 +29,7 @@ const sourceDir = path.resolve(
 
 async function main() {
   if (!isStorageEnabled) {
-    console.error("Set DO_SPACES_KEY, DO_SPACES_SECRET, DO_SPACES_REGION and DO_SPACES_BUCKET first.");
+    console.error("Set CLOUDINARY_URL (or CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET) first.");
     process.exit(1);
   }
   if (!fs.existsSync(sourceDir)) {
@@ -43,7 +43,7 @@ async function main() {
     .map((entry) => entry.name)
     .filter((name) => ALLOWED_EXTENSIONS.has(path.extname(name).toLowerCase()));
 
-  console.log(`${files.length} file(s) in ${sourceDir} -> Spaces folder "${STORAGE_FOLDER}"`);
+  console.log(`${files.length} file(s) in ${sourceDir} -> Cloudinary folder "${STORAGE_FOLDER}"`);
   if (dryRun) {
     files.forEach((name) => console.log(`  ${name}`));
     return;

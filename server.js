@@ -207,8 +207,9 @@ app.use(userLogHistory);
 app.use("/images", express.static(process.env.UPLOAD_DIR || "images"));
 
 // Older records store only "<uuid>.<ext>". Once those files are migrated to
-// Spaces (tools/migrateUploadsToSpaces.js) they no longer exist on disk, so
-// redirect to the Spaces copy that keeps the same name.
+// Cloudinary (tools/migrateUploadsToCloudinary.js) they no longer exist on
+// disk, so redirect to the copy that keeps the same name (or to
+// LEGACY_FILES_BASE_URL when set, see helpers/storage.js).
 if (isStorageEnabled) {
   app.get("/images/:name", (req, res, next) => {
     const name = path.basename(req.params.name);

@@ -136,7 +136,7 @@ const updateProfile = async (user, { name, email, address, city } = {}) => {
   return toProfile(row);
 };
 
-// `file` comes from the uploadAvatar middleware, which has already pushed it to Spaces.
+// `file` comes from the uploadAvatar middleware, which has already pushed it to Cloudinary.
 const updatePhoto = async (user, file) => {
   if (!file?.path) throw new ApiError(400, "Please choose an image to upload");
   const row = await User.findOne({ where: { Id: user.Id } });

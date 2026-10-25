@@ -8,7 +8,7 @@ const {
 } = require("../../helpers/storage");
 const ApiError = require("../../error/ApiError");
 
-// Every upload goes to DigitalOcean Spaces; there is no local disk fallback, so a
+// Every upload goes to Cloudinary; there is no local disk fallback, so a
 // missing configuration fails the request instead of silently writing files
 // that disappear on the next deploy.
 
@@ -79,7 +79,7 @@ const collectFiles = (req) => {
   return [];
 };
 
-// Uploads the in-memory files to Spaces, then sets `filename` and `path`
+// Uploads the in-memory files to Cloudinary, then sets `filename` and `path`
 // to the public URL, so controllers that store either keep working unchanged.
 const pushToStorage = async (req) => {
   const files = collectFiles(req);

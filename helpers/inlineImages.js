@@ -8,7 +8,7 @@ const ApiError = require("../error/ApiError");
 
 // The admin panel reads image inputs with FileReader.readAsDataURL and sends
 // them as base64 strings. Stored as-is they bloat every public API response
-// (a single category image was 3 MB), so they are uploaded to Spaces and
+// (a single category image was 3 MB), so they are uploaded to Cloudinary and
 // only the URL is kept in the database.
 
 const EXTENSION_BY_MIME = {
@@ -19,7 +19,7 @@ const EXTENSION_BY_MIME = {
   "image/webp": ".webp",
   "image/x-icon": ".ico",
   "image/vnd.microsoft.icon": ".ico",
-  // Served from the Spaces domain, so SVG scripts can't run on our origin.
+  // Served from the Cloudinary domain, so SVG scripts can't run on our origin.
   "image/svg+xml": ".svg",
 };
 
@@ -63,7 +63,7 @@ const replaceInString = async (value, cache) => {
 
 /**
  * Deep-walks `value` and returns a copy where every base64 image data URI —
- * whole field values or ones embedded in HTML — is replaced by its Spaces
+ * whole field values or ones embedded in HTML — is replaced by its Cloudinary
  * URL. Identical images inside one call are uploaded once.
  */
 const replaceInlineImages = async (value, cache = new Map()) => {
