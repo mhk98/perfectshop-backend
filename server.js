@@ -21,6 +21,7 @@ const ApiError = require("./error/ApiError");
 const userLogHistory = require("./app/middlewares/userLogHistory");
 const { initializeChatSocket } = require("./app/realtime/socket");
 const { isStorageEnabled, publicUrlForFile } = require("./helpers/storage");
+const VisitorStatService = require("./app/modules/visitorStat/visitorStat.service");
 
 const {
   createCourierSyncWorker,
@@ -408,6 +409,7 @@ process.on("SIGTERM", async () => {
   console.log("SIGTERM received. Shutting down gracefully...");
   await courierSyncWorker.stop();
   await scratchCardCourierSyncWorker.stop();
+  await VisitorStatService.flush();
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");
@@ -419,6 +421,7 @@ process.on("SIGINT", async () => {
   console.log("SIGINT received. Shutting down gracefully...");
   await courierSyncWorker.stop();
   await scratchCardCourierSyncWorker.stop();
+  await VisitorStatService.flush();
   await db.sequelize.close();
   server.close(() => {
     console.log("Server closed");

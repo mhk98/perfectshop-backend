@@ -364,7 +364,8 @@ const toMetaEvent = ({ eventName, eventId, eventSourceUrl, userData = {}, custom
   const hashedState = state ? [hash(cleanGeoString(state))] : undefined;
 
   const zip = resolvePostalCode(userData.zip, userData.postalCode, userData.address);
-  const hashedZip = zip ? [hash(cleanGeoString(zip))] : undefined;
+  // zip is 4 digits already; cleanGeoString keeps only letters and would empty it.
+  const hashedZip = zip ? [hash(zip)] : undefined;
 
   // Country: Bangladesh is always "bd"
   const hashedCountry = [hash("bd")];
@@ -419,7 +420,8 @@ const resolveTestCode = (payload, configuredCode) => {
   const testCode =
     payload.testEventCode || (process.env.NODE_ENV !== "production" || devEvent ? configuredCode : undefined);
   if (devEvent && !testCode) return null;
-  return testCode;
+  // A pixel saved without a test code stores null; that must not read as "drop".
+  return testCode || undefined;
 };
 
 const DEV_EVENT_SKIP_REASON = "Event from a local development URL; set a test event code to send it";

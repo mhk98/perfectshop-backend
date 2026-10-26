@@ -2,6 +2,7 @@ const { Op } = require("sequelize");
 const paginationHelpers = require("../../../helpers/paginationHelper");
 const db = require("../../../models");
 const ApiError = require("../../../error/ApiError");
+const { createTtlCache } = require("../../../shared/ttlCache");
 const M = () => db.tiktokPixel;
 
 const normalizePayload = (data = {}) => {
@@ -26,7 +27,9 @@ const ensureUnique = async (pixelCode, excludeId) => {
 const insertIntoDB = async (data) => {
   const payload = normalizePayload(data);
   await ensureUnique(payload.pixelCode);
-  return M().create(payload);
+  const row = await M().create(payload);
+  activeCache.clear();
+  return row;
 };
 
 const getAllFromDB = async (filters, options) => {
@@ -40,8 +43,12 @@ const getAllFromDB = async (filters, options) => {
   return { meta: { count, page, limit }, data };
 };
 
-const getActiveFromDB = async () =>
-  M().findAll({ where: { status: "Active" }, paranoid: true, order: [["createdAt", "DESC"]] });
+// Read on every tracking event; cleared below whenever a config changes.
+const activeCache = createTtlCache(() =>
+  M().findAll({ where: { status: "Active" }, paranoid: true, order: [["createdAt", "DESC"]] }),
+);
+
+const getActiveFromDB = () => activeCache.get();
 
 const getPublicFromDB = async () => {
   const rows = await getActiveFromDB();
@@ -57,6 +64,7 @@ const updateOneFromDB = async (id, payload) => {
   const data = normalizePayload({ ...row.get({ plain: true }), ...payload });
   await ensureUnique(data.pixelCode, row.Id);
   await row.update(data);
+  activeCache.clear();
   return row;
 };
 
@@ -64,6 +72,7 @@ const deleteIdFromDB = async (id) => {
   const row = await M().findOne({ where: { Id: id } });
   if (!row) throw new ApiError(404, "TikTok pixel not found");
   await row.destroy();
+  activeCache.clear();
   return { deleted: true };
 };
 
